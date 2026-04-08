@@ -245,6 +245,17 @@ async function getMarketData({ symbol = config.instrument.symbol, timeframe = co
       return await fetchLiveMarketData(symbol, timeframe);
     } catch (error) {
       log("market", `Live market data failed: ${error.message}`);
+      // In live mode, do NOT silently serve synthetic data — surface the error
+      // so the agent cannot make decisions on fake prices.
+      if (!config.paper.enabled) {
+        return {
+          success: false,
+          error: `Live market data unavailable: ${error.message}`,
+          exchange: config.instrument.exchange,
+          symbol,
+          timeframe,
+        };
+      }
       return {
         ...buildPaperMarketData({ symbol, timeframe }),
         liveFallback: true,
@@ -765,6 +776,20 @@ async function openTrade(args) {
     signal_snapshot = null,
   } = args;
 
+  // Validate required fields before any state or exchange interaction
+  if (!direction || (direction !== "long" && direction !== "short")) {
+    return { success: false, error: `open_trade: invalid or missing direction "${direction}" — must be "long" or "short"` };
+  }
+  if (!Number.isFinite(Number(entry_price)) || Number(entry_price) <= 0) {
+    return { success: false, error: `open_trade: invalid entry_price "${entry_price}" — must be a positive number` };
+  }
+  if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
+    return { success: false, error: `open_trade: invalid quantity "${quantity}" — must be a positive number` };
+  }
+  if (stop_loss != null && !Number.isFinite(Number(stop_loss))) {
+    return { success: false, error: `open_trade: invalid stop_loss "${stop_loss}" — must be a number` };
+  }
+
   const tradeId = `T${Date.now()}`;
 
   if (config.paper.enabled) {
@@ -841,6 +866,14 @@ async function openTrade(args) {
 
 async function closeTrade(args) {
   const { trade_id, exit_price, reason } = args;
+
+  // Validate required fields before any state or exchange interaction
+  if (!trade_id || typeof trade_id !== "string" || !trade_id.trim()) {
+    return { success: false, error: `close_trade: missing or invalid trade_id "${trade_id}"` };
+  }
+  if (!Number.isFinite(Number(exit_price)) || Number(exit_price) <= 0) {
+    return { success: false, error: `close_trade: invalid exit_price "${exit_price}" — must be a positive number` };
+  }
 
   if (config.paper.enabled) {
     return paperCloseTrade({ tradeId: trade_id, exitPrice: exit_price, reason });
@@ -1107,6 +1140,14 @@ async function getAccountBalance() {
       return buildLiveAccountResult(account);
     } catch (error) {
       log("account", `Live account balance failed: ${error.message}`);
+      // In live mode, do NOT silently serve paper balances — surface the error.
+      if (!config.paper.enabled) {
+        return {
+          success: false,
+          error: `Live account balance unavailable: ${error.message}`,
+          exchange: config.instrument.exchange,
+        };
+      }
       return {
         ...buildPaperAccountBalance(),
         liveFallback: true,
@@ -1430,13 +1471,13 @@ async function runSafetyChecks(name, args) {
       if (!direction || !["long", "short"].includes(direction)) {
         return { pass: false, reason: `direction must be "long" or "short". Got: ${direction}` };
       }
-      if (!entry_price || entry_price <= 0) {
+      if (!Number.isFinite(Number(entry_price)) || Number(entry_price) <= 0) {
         return { pass: false, reason: `entry_price must be a positive number. Got: ${entry_price}` };
       }
-      if (!quantity || quantity <= 0) {
+      if (!Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
         return { pass: false, reason: `quantity must be a positive number. Got: ${quantity}` };
       }
-      if (!stop_loss || stop_loss <= 0) {
+      if (!Number.isFinite(Number(stop_loss)) || Number(stop_loss) <= 0) {
         return { pass: false, reason: "stop_loss is required for every trade. No SL = trade blocked." };
       }
 
@@ -1542,10 +1583,10 @@ async function runSafetyChecks(name, args) {
 
     case "close_trade": {
       const { trade_id, exit_price } = args;
-      if (!trade_id) {
+      if (!trade_id || typeof trade_id !== "string" || !trade_id.trim()) {
         return { pass: false, reason: "trade_id is required to close a trade." };
       }
-      if (!exit_price || exit_price <= 0) {
+      if (!Number.isFinite(Number(exit_price)) || Number(exit_price) <= 0) {
         return { pass: false, reason: `exit_price must be a positive number. Got: ${exit_price}` };
       }
 

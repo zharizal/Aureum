@@ -44,7 +44,7 @@ Do not expect Solana, DLMM, pool, token, or forex lot/pip setup in the current r
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/yunus-0x/aureum
+git clone https://github.com/zharizal/Aureum
 cd aureum
 npm install
 ```

@@ -112,6 +112,14 @@ function roundTo(value, decimals) {
   return Math.round(value * factor) / factor;
 }
 
+/**
+ * Compute position size based on account balance and risk parameters.
+ *
+ * @param {number} accountBalance - Available account balance in USD
+ * @param {number} entryPrice     - Intended entry price
+ * @param {number} stopPrice      - Stop-loss price
+ * @returns {number} Normalised quantity respecting min/max constraints
+ */
 export function computeOrderQuantity(accountBalance, entryPrice, stopPrice) {
   if (!entryPrice || entryPrice <= 0) return config.instrument.minQuantity;
 
@@ -128,6 +136,10 @@ export function computeOrderQuantity(accountBalance, entryPrice, stopPrice) {
   return roundTo(bounded, config.instrument.quantityPrecision);
 }
 
+/**
+ * Hot-reload signal thresholds from user-config.json without a full restart.
+ * Only updates `config.signal.*` keys.
+ */
 export function reloadSignalThresholds() {
   if (!fs.existsSync(USER_CONFIG_PATH)) return;
   try {
