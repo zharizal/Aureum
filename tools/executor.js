@@ -36,6 +36,7 @@ import {
   notifyTradeClose,
 } from "../telegram.js";
 
+import { computeAllIndicators } from "../indicators.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -66,7 +67,7 @@ function timeframeToMs(timeframe = config.market.timeframe) {
   return value * (multipliers[unit] ?? 15 * 60 * 1000);
 }
 
-function buildSyntheticCandles({ price, timeframe, count = 20 }) {
+function buildSyntheticCandles({ price, timeframe, count = 200 }) {
   const stepMs = timeframeToMs(timeframe);
   const now = Date.now();
   const candles = [];
@@ -122,10 +123,11 @@ function buildPaperMarketData({ symbol = config.instrument.symbol, timeframe = c
   };
 }
 
-// ─── Live market-data helpers (Binance-format REST API) ──────────────────────
+// ─── Live market-data helpers (Tokocrypto REST API) ──────────────────────────
 
+// Tokocrypto symbol format: XAUT_USDT (slash/dash/space → underscore, uppercase)
 function toApiSymbol(symbol) {
-  return symbol.replace(/[\/\-_\s]/g, "").toUpperCase();
+  return symbol.replace(/[\/\-\s]/g, "_").replace(/_+/g, "_").toUpperCase();
 }
 
 function toKlineInterval(timeframe) {
@@ -133,31 +135,34 @@ function toKlineInterval(timeframe) {
 }
 
 async function fetchLiveMarketData(symbol, timeframe) {
-  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://www.tokocrypto.com").replace(/\/+$/, "");
   const apiSymbol = toApiSymbol(symbol);
   const interval = toKlineInterval(timeframe);
   const signal = AbortSignal.timeout(10_000);
 
-  const [tickerRes, klinesRes] = await Promise.all([
-    fetch(`${base}/api/v3/ticker/bookTicker?symbol=${apiSymbol}`, { signal }),
-    fetch(`${base}/api/v3/klines?symbol=${apiSymbol}&interval=${interval}&limit=20`, { signal }),
+  const [depthRes, klinesRes] = await Promise.all([
+    fetch(`${base}/open/v1/market/depth?symbol=${apiSymbol}`, { signal }),
+    fetch(`${base}/open/v1/market/klines?symbol=${apiSymbol}&interval=${interval}&limit=200`, { signal }),
   ]);
 
-  if (!tickerRes.ok) throw new Error(`Ticker: HTTP ${tickerRes.status}`);
+  if (!depthRes.ok) throw new Error(`Depth: HTTP ${depthRes.status}`);
   if (!klinesRes.ok) throw new Error(`Klines: HTTP ${klinesRes.status}`);
 
-  const ticker = await tickerRes.json();
+  const depth = await depthRes.json();
   const rawKlines = await klinesRes.json();
 
-  const bid = Number(ticker.bidPrice);
-  const ask = Number(ticker.askPrice);
+  // Tokocrypto responses are wrapped: { code, msg, data: { bids, asks } / { list } }
+  const depthData = depth.data ?? depth;
+  const bid = Number(depthData.bids?.[0]?.[0] ?? 0);
+  const ask = Number(depthData.asks?.[0]?.[0] ?? 0);
   const price = roundTo((bid + ask) / 2, config.instrument.pricePrecision);
 
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error("Invalid bid/ask from API — cannot derive price");
   }
 
-  const candles = rawKlines.map((k) => ({
+  const klineList = (rawKlines.data?.list ?? rawKlines.data ?? rawKlines);
+  const parsedCandles = (Array.isArray(klineList) ? klineList : []).map((k) => ({
     timestamp: new Date(k[0]).toISOString(),
     open: Number(k[1]),
     high: Number(k[2]),
@@ -165,6 +170,11 @@ async function fetchLiveMarketData(symbol, timeframe) {
     close: Number(k[4]),
     volume: Number(k[5]),
   }));
+
+  const candlesFallback = parsedCandles.length === 0;
+  const candles = candlesFallback
+    ? buildSyntheticCandles({ price, timeframe })
+    : parsedCandles;
 
   return {
     success: true,
@@ -178,10 +188,11 @@ async function fetchLiveMarketData(symbol, timeframe) {
     spreadPct: price > 0 ? roundTo(((ask - bid) / price) * 100, 4) : 0,
     timestamp: new Date().toISOString(),
     candles,
+    ...(candlesFallback && { note: "Live klines returned empty — candles are synthetic, built from live price." }),
   };
 }
 
-// ─── getMarketData: custom URL → Binance-format live → paper fallback ────────
+// ─── getMarketData: custom URL → Tokocrypto live → paper fallback ────────────
 
 async function getMarketData({ symbol = config.instrument.symbol, timeframe = config.market.timeframe } = {}) {
   // Path 1: Legacy custom URL override (TOKOCRYPTO_MARKET_DATA_URL)
@@ -226,8 +237,8 @@ async function getMarketData({ symbol = config.instrument.symbol, timeframe = co
     }
   }
 
-  // Path 2: Binance-format REST API (Tokocrypto / Binance public)
-  // Non-paper mode: always try (defaults to api.binance.com)
+  // Path 2: Tokocrypto REST API (live market data)
+  // Non-paper mode: always try (defaults to www.tokocrypto.com)
   // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set
   if (!config.paper.enabled || process.env.TOKOCRYPTO_API_URL) {
     try {
@@ -367,10 +378,10 @@ async function paperCloseTrade({ tradeId, exitPrice, reason }) {
   };
 }
 
-// ─── Live order helpers (Binance-format signed API) ──────────────────────────
+// ─── Live order helpers (Tokocrypto signed API) ──────────────────────────────
 
 async function placeMarketOrder(symbol, side, quantity) {
-  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://www.tokocrypto.com").replace(/\/+$/, "");
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
   const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
@@ -379,7 +390,7 @@ async function placeMarketOrder(symbol, side, quantity) {
   const timestamp = Date.now();
   const qs = `symbol=${apiSymbol}&side=${side.toUpperCase()}&type=MARKET&quantity=${quantity}&timestamp=${timestamp}&recvWindow=10000`;
   const signature = signQuery(qs, apiSecret);
-  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const url = `${base}/open/v1/orders?${qs}&signature=${signature}`;
   const signal = AbortSignal.timeout(10_000);
 
   const res = await fetch(url, {
@@ -393,11 +404,12 @@ async function placeMarketOrder(symbol, side, quantity) {
     throw new Error(`Order HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
 
-  return res.json();
+  const json = await res.json();
+  return json.data ?? json;
 }
 
 async function getOrderStatus(symbol, orderId) {
-  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://www.tokocrypto.com").replace(/\/+$/, "");
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
   const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
@@ -406,7 +418,7 @@ async function getOrderStatus(symbol, orderId) {
   const timestamp = Date.now();
   const qs = `symbol=${apiSymbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=10000`;
   const signature = signQuery(qs, apiSecret);
-  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const url = `${base}/open/v1/orders/detail?${qs}&signature=${signature}`;
   const signal = AbortSignal.timeout(10_000);
 
   const res = await fetch(url, {
@@ -419,11 +431,12 @@ async function getOrderStatus(symbol, orderId) {
     throw new Error(`OrderStatus HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
 
-  return res.json();
+  const json = await res.json();
+  return json.data ?? json;
 }
 
 async function cancelOrder(symbol, orderId) {
-  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://www.tokocrypto.com").replace(/\/+$/, "");
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
   const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
@@ -432,11 +445,12 @@ async function cancelOrder(symbol, orderId) {
   const timestamp = Date.now();
   const qs = `symbol=${apiSymbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=10000`;
   const signature = signQuery(qs, apiSecret);
-  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const url = `${base}/open/v1/orders/cancel?${qs}&signature=${signature}`;
   const signal = AbortSignal.timeout(10_000);
 
+  // Tokocrypto cancel order uses POST /open/v1/orders/cancel
   const res = await fetch(url, {
-    method: "DELETE",
+    method: "POST",
     headers: { "X-MBX-APIKEY": apiKey },
     signal,
   });
@@ -446,11 +460,12 @@ async function cancelOrder(symbol, orderId) {
     throw new Error(`CancelOrder HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
 
-  return res.json();
+  const json = await res.json();
+  return json.data ?? json;
 }
 
 function extractFillPrice(orderResult) {
-  // Binance MARKET orders return fills[] with price/qty per fill
+  // Tokocrypto MARKET orders return fills[] with price/qty per fill
   if (Array.isArray(orderResult.fills) && orderResult.fills.length > 0) {
     let totalQty = 0;
     let totalNotional = 0;
@@ -462,9 +477,9 @@ function extractFillPrice(orderResult) {
     }
     return totalQty > 0 ? roundTo(totalNotional / totalQty, config.instrument.pricePrecision) : 0;
   }
-  // Fallback to cummulativeQuoteQty / executedQty
+  // Fallback: cumulativeQuoteQty / executedQty
   const execQty = Number(orderResult.executedQty);
-  const cumQuote = Number(orderResult.cummulativeQuoteQty);
+  const cumQuote = Number(orderResult.cumulativeQuoteQty ?? orderResult.cummulativeQuoteQty);
   if (execQty > 0 && cumQuote > 0) return roundTo(cumQuote / execQty, config.instrument.pricePrecision);
   return 0;
 }
@@ -473,7 +488,6 @@ function extractFillFee(orderResult) {
   if (!Array.isArray(orderResult.fills)) return 0;
   let totalFee = 0;
   for (const fill of orderResult.fills) {
-    // Binance reports commission in commissionAsset — approximate USD value
     totalFee += Number(fill.commission ?? 0);
   }
   return roundTo(totalFee, 6);
@@ -951,14 +965,14 @@ function buildPaperAccountBalance() {
   };
 }
 
-// ─── Live account balance (Binance-format signed API) ────────────────────────
+// ─── Live account balance (Tokocrypto signed API) ────────────────────────────
 
 function signQuery(queryString, secret) {
   return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
 }
 
 async function fetchLiveAccountBalance() {
-  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://www.tokocrypto.com").replace(/\/+$/, "");
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
   const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
 
@@ -966,39 +980,65 @@ async function fetchLiveAccountBalance() {
     throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required for live account");
   }
 
-  const timestamp = Date.now();
-  const qs = `timestamp=${timestamp}&recvWindow=10000`;
-  const signature = signQuery(qs, apiSecret);
-  const url = `${base}/api/v3/account?${qs}&signature=${signature}`;
-  const signal = AbortSignal.timeout(10_000);
-
-  const res = await fetch(url, {
-    headers: { "X-MBX-APIKEY": apiKey },
-    signal,
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+  function signedUrl(path, extraQs = "") {
+    const timestamp = Date.now();
+    const qs = `timestamp=${timestamp}&recvWindow=10000${extraQs ? `&${extraQs}` : ""}`;
+    const signature = signQuery(qs, apiSecret);
+    return `${base}${path}?${qs}&signature=${signature}`;
   }
 
-  return res.json();
+  async function apiFetch(url) {
+    const signal = AbortSignal.timeout(10_000);
+    const res = await fetch(url, { headers: { "X-MBX-APIKEY": apiKey }, signal });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+
+  const quoteAsset = config.instrument.quoteAsset;
+  const baseAsset = config.instrument.baseAsset;
+
+  // Prefer per-asset endpoint: GET /open/v1/account/spot/asset?asset=X
+  // Returns { asset, free, locked } under data — more targeted and reliable.
+  try {
+    const [quoteJson, baseJson] = await Promise.all([
+      apiFetch(signedUrl("/open/v1/account/spot/asset", `asset=${quoteAsset}`)),
+      apiFetch(signedUrl("/open/v1/account/spot/asset", `asset=${baseAsset}`)),
+    ]);
+    const quoteData = quoteJson.data ?? quoteJson;
+    const baseData = baseJson.data ?? baseJson;
+    if (quoteData?.asset && baseData?.asset) {
+      return { balances: [quoteData, baseData], canTrade: true };
+    }
+  } catch (_) {
+    // fall through to full account endpoint
+  }
+
+  // Fallback: GET /open/v1/account/spot — official response: data.accountAssets[]
+  const json = await apiFetch(signedUrl("/open/v1/account/spot"));
+  const data = json.data ?? json;
+  // Normalise data.accountAssets → balances so buildLiveAccountResult can find assets.
+  const accountAssets = data.accountAssets ?? data.balances ?? (Array.isArray(data) ? data : []);
+  return { ...data, balances: accountAssets };
 }
 
 function buildLiveAccountResult(account) {
   const quoteAsset = config.instrument.quoteAsset;
   const baseAsset = config.instrument.baseAsset;
 
-  const quoteBal = account.balances?.find((b) => b.asset === quoteAsset);
-  const baseBal = account.balances?.find((b) => b.asset === baseAsset);
+  // Tokocrypto balance fields: a=asset, f=free, l=locked
+  const quoteBal = account.balances?.find((b) => (b.a ?? b.asset) === quoteAsset);
+  const baseBal = account.balances?.find((b) => (b.a ?? b.asset) === baseAsset);
 
-  const quoteTotal = roundTo(Number(quoteBal?.free ?? 0) + Number(quoteBal?.locked ?? 0), 2);
-  const quoteAvailable = roundTo(Number(quoteBal?.free ?? 0), 2);
-  const quoteLocked = roundTo(Number(quoteBal?.locked ?? 0), 2);
+  const quoteTotal = roundTo(Number(quoteBal?.f ?? quoteBal?.free ?? 0) + Number(quoteBal?.l ?? quoteBal?.locked ?? 0), 2);
+  const quoteAvailable = roundTo(Number(quoteBal?.f ?? quoteBal?.free ?? 0), 2);
+  const quoteLocked = roundTo(Number(quoteBal?.l ?? quoteBal?.locked ?? 0), 2);
 
-  const baseTotal = roundTo(Number(baseBal?.free ?? 0) + Number(baseBal?.locked ?? 0), config.instrument.quantityPrecision);
-  const baseAvailable = roundTo(Number(baseBal?.free ?? 0), config.instrument.quantityPrecision);
-  const baseLocked = roundTo(Number(baseBal?.locked ?? 0), config.instrument.quantityPrecision);
+  const baseTotal = roundTo(Number(baseBal?.f ?? baseBal?.free ?? 0) + Number(baseBal?.l ?? baseBal?.locked ?? 0), config.instrument.quantityPrecision);
+  const baseAvailable = roundTo(Number(baseBal?.f ?? baseBal?.free ?? 0), config.instrument.quantityPrecision);
+  const baseLocked = roundTo(Number(baseBal?.l ?? baseBal?.locked ?? 0), config.instrument.quantityPrecision);
 
   return {
     success: true,
@@ -1026,7 +1066,7 @@ function buildLiveAccountResult(account) {
   };
 }
 
-// ─── getAccountBalance: custom URL → Binance signed → paper fallback ─────────
+// ─── getAccountBalance: custom URL → Tokocrypto signed → paper fallback ──────
 
 async function getAccountBalance() {
   // Path 1: Legacy custom URL override (TOKOCRYPTO_ACCOUNT_URL)
@@ -1056,7 +1096,7 @@ async function getAccountBalance() {
     }
   }
 
-  // Path 2: Binance-format signed REST API
+  // Path 2: Tokocrypto signed REST API
   // Non-paper mode: try if API key/secret are set
   // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set AND key/secret exist
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
@@ -1091,13 +1131,26 @@ const toolMap = {
   get_open_trades: getOpenTrades,
   get_account_balance: getAccountBalance,
   set_trade_instruction: setTradeInstructionTool,
-  get_market_data: getMarketData,
+  get_market_data: async (args) => {
+    const result = await getMarketData(args);
+    if (result?.candles?.length) result.indicators = computeAllIndicators(result.candles);
+    return result;
+  },
   get_atr: async ({ symbol = config.instrument.symbol, period } = {}) => {
     const atrPeriod = period ?? config.market.atrPeriod;
     const marketData = await getMarketData({ symbol, timeframe: config.market.timeframe });
     const candles = marketData.candles;
     if (!candles || candles.length < 2) {
-      return { success: false, error: "Not enough candle data to compute ATR." };
+      return {
+        success: false,
+        atr_available: false,
+        error: "Not enough candle data to compute ATR.",
+        price: marketData.price ?? null,
+        live: marketData.live ?? false,
+        paper: marketData.paper ?? false,
+        exchange: config.instrument.exchange,
+        symbol,
+      };
     }
     const trueRanges = [];
     for (let i = 1; i < candles.length; i++) {
@@ -1118,9 +1171,11 @@ const toolMap = {
       atr,
       period: effectivePeriod,
       price: marketData.price,
-      note: marketData.live
+      note: marketData.live && !marketData.note
         ? "ATR computed from live candle data."
-        : "ATR computed from synthetic paper candle data.",
+        : marketData.live && marketData.note
+          ? "ATR computed from synthetic candles (live klines were empty)."
+          : "ATR computed from synthetic paper candle data.",
     };
   },
   get_session_info: async () => {

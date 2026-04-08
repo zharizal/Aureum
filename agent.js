@@ -182,14 +182,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       // Retry up to 3 times on transient provider errors
       for (let attempt = 0; attempt < 3; attempt++) {
-        response = await client.chat.completions.create({
+        const reqParams = {
           model: usedModel,
           messages,
           tools: getToolsForRole(agentType, goal),
-          tool_choice: toolChoice,
           temperature: config.llm.temperature,
           max_tokens: maxOutputTokens ?? config.llm.maxTokens,
-        });
+        };
+        // tool_choice omitted — not supported by all providers (e.g. minimax)
+        response = await client.chat.completions.create(reqParams);
         if (response.choices?.length) break;
         const errCode = response.error?.code;
         if (errCode === 502 || errCode === 503 || errCode === 529) {

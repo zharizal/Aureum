@@ -122,9 +122,10 @@ ANALYST BEHAVIOR:
 - If market-data tools return stubs, do not pretend a live setup was confirmed. Report that live analysis context is incomplete.
 
 ANALYST OUTPUT STYLE:
-- Be direct.
-- If no qualified setup exists, say HOLD or NO SETUP.
-- If a setup exists, explain it in XAUT/USDT spot terms only.`;
+- Plain text only. No markdown, no bold, no tables.
+- Always follow the exact format from the task prompt: header with Mode, market snapshot, trade levels, performance line, action.
+- Action: one short line starting with "Aksi:".
+- If no qualified setup exists, header status is HOLD or NO SETUP.`;
 }
 
 function buildManagerPrompt() {
@@ -144,9 +145,10 @@ MANAGER BEHAVIOR:
 - Focus on trade management, not new setup hunting, unless the user explicitly asks for broader help.
 
 MANAGER OUTPUT STYLE:
-- Summarize each relevant trade clearly.
-- State HOLD vs CLOSE decisions in trade language.
-- Keep reasoning tied to current tracked trade state and actual tool results.`;
+- Plain text only. No markdown, no bold, no tables.
+- After executing actions, output 2-4 short bullet points explaining what happened.
+- End with one "Action:" line summarizing the outcome.
+- Keep reasoning tied to actual tool results only.`;
 }
 
 function buildGeneralPrompt() {

@@ -26,6 +26,125 @@ import {
 } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 
+/**
+ * Sanitize and reformat analyst LLM output into the exact compact template.
+ * Extracts key/value pairs regardless of how verbose or markdown-heavy the response is.
+ */
+function formatAnalystOutput(raw, { symbol, timeframe, paperMode }) {
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+
+  // Helper: find first match across all lines for a set of patterns
+  function extract(...patterns) {
+    for (const pat of patterns) {
+      for (const line of lines) {
+        const m = line.match(pat);
+        if (m) return m[1].trim();
+      }
+    }
+    return null;
+  }
+
+  // Status: look for known keywords on any line
+  let status = "-";
+  for (const line of lines) {
+    const l = line.toUpperCase();
+    if (/OPEN TRADE/.test(l)) { status = "OPEN TRADE"; break; }
+    if (/NO SETUP/.test(l))   { status = "NO SETUP";   break; }
+    if (/HOLD/.test(l))       { status = "HOLD";        break; }
+    if (/WAIT/.test(l))       { status = "WAIT";        break; }
+  }
+
+  const mode = paperMode ? "PAPER" : "LIVE";
+
+  const harga = extract(
+    /^Harga\s*:\s*([0-9.,]+)/i,
+    /harga[^\d]*([0-9.,]+)/i,
+    /price[^\d]*([0-9.,]+)/i,
+    /last\s*price[^\d]*([0-9.,]+)/i
+  ) || "-";
+
+  // EMA — try combined line first, then individual
+  let ema20 = "-", ema50 = "-", ema200 = "-";
+  const emaLine = extract(/EMA20\/50\/200\s*:\s*([0-9.,/ ]+)/i, /EMA[^:\n]*:\s*([0-9.,/ ]+)/i);
+  if (emaLine) {
+    const parts = emaLine.split(/\s*\/\s*/);
+    if (parts[0]) ema20  = parts[0].trim();
+    if (parts[1]) ema50  = parts[1].trim();
+    if (parts[2]) ema200 = parts[2].trim();
+  }
+  ema20  = extract(/EMA20\s*:\s*([0-9.,]+)/i,  /\bema20[^\d]*([0-9.,]+)/i)  || ema20;
+  ema50  = extract(/EMA50\s*:\s*([0-9.,]+)/i,  /\bema50[^\d]*([0-9.,]+)/i)  || ema50;
+  ema200 = extract(/EMA200\s*:\s*([0-9.,]+)/i, /\bema200[^\d]*([0-9.,]+)/i) || ema200;
+
+  const rsi = extract(/RSI14?\s*:\s*([0-9.,]+)/i, /\brsi[^\d]*([0-9.,]+)/i) || "-";
+  const atr = extract(/ATR14?\s*:\s*([0-9.,]+)/i, /\batr[^\d]*([0-9.,]+)/i) || "-";
+
+  let rangeLow = "-", rangeHigh = "-";
+  const rangeLine = extract(/Range\s*:\s*([0-9.,]+)\s*[-–]\s*([0-9.,]+)/i);
+  if (rangeLine) {
+    // rangeLine matched group 1 only — re-match for both groups
+    for (const line of lines) {
+      const m = line.match(/Range\s*:\s*([0-9.,]+)\s*[-–]\s*([0-9.,]+)/i);
+      if (m) { rangeLow = m[1].trim(); rangeHigh = m[2].trim(); break; }
+    }
+  }
+  if (rangeLow === "-") {
+    const low  = extract(/low20?\s*:\s*([0-9.,]+)/i,  /\blow[^\d]*([0-9.,]+)/i);
+    const high = extract(/high20?\s*:\s*([0-9.,]+)/i, /\bhigh[^\d]*([0-9.,]+)/i);
+    if (low)  rangeLow  = low;
+    if (high) rangeHigh = high;
+  }
+
+  const saldo = extract(
+    /Saldo\s*:\s*([0-9.,]+)/i,
+    /balance[^\d]*([0-9.,]+)/i,
+    /available[^\d]*([0-9.,]+)/i
+  ) || "-";
+
+  const entry = extract(/^Entry\s*:\s*([^\n]+)/im) || "-";
+  const sl    = extract(/^SL\s*:\s*([^\n]+)/im, /stop.?loss\s*:\s*([0-9.,]+)/i) || "-";
+  const tp    = extract(/^TP\s*:\s*([^\n]+)/im, /take.?profit\s*:\s*([0-9.,]+)/i) || "-";
+  const rr    = extract(/^RR\s*:\s*([^\n]+)/im, /risk.?reward\s*:\s*([0-9.,]+)/i) || "-";
+
+  let wr = "N/A", tpCount = "0", slCount = "0", total = "0";
+  const wrLine = extract(/WR\s*:\s*([^\n|]+)/i);
+  if (wrLine) wr = wrLine.replace(/[%\s]/g, "").trim() || "N/A";
+  const tpC = extract(/\bTP\s*:\s*(\d+)/i);           if (tpC) tpCount = tpC;
+  const slC = extract(/\bSL\s*:\s*(\d+)/i);           if (slC) slCount = slC;
+  const tot = extract(/Trade\s*:\s*(\d+)/i, /Total\s*:\s*(\d+)/i); if (tot) total = tot;
+
+  // WR line — try the structured pattern first
+  for (const line of lines) {
+    const m = line.match(/WR\s*:\s*([0-9.]+%?|N\/A)\s*\|\s*TP\s*:\s*(\d+)\s*\|\s*SL\s*:\s*(\d+)\s*\|\s*Trade\s*:\s*(\d+)/i);
+    if (m) { wr = m[1]; tpCount = m[2]; slCount = m[3]; total = m[4]; break; }
+  }
+
+  const aksi = extract(/^Aksi\s*:\s*(.+)/im) || "-";
+
+  const sym = symbol || "XAUT/USDT";
+  const tf  = timeframe || "15m";
+
+  return [
+    `${sym} ${tf} | ${status}`,
+    `Mode: ${mode}`,
+    ``,
+    `Harga: ${harga}`,
+    `EMA20/50/200: ${ema20} / ${ema50} / ${ema200}`,
+    `RSI14: ${rsi}`,
+    `ATR14: ${atr}`,
+    `Range: ${rangeLow} - ${rangeHigh}`,
+    `Saldo: ${saldo}`,
+    ``,
+    `Entry: ${entry}`,
+    `SL: ${sl}`,
+    `TP: ${tp}`,
+    `RR: ${rr}`,
+    ``,
+    `WR: ${wr} | TP: ${tpCount} | SL: ${slCount} | Trade: ${total}`,
+    `Aksi: ${aksi}`,
+  ].join("\n");
+}
+
 log("startup", "XAUT/USDT Tokocrypto trading agent starting...");
 log("startup", `Mode: ${config.paper.enabled ? "PAPER" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || config.llm.generalModel}`);
@@ -63,6 +182,22 @@ let _pollTriggeredAt = 0;
 function stripThink(text) {
   if (!text) return text;
   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+function formatPerfSnapshot(perfSummary) {
+  if (!perfSummary) {
+    return "WR: N/A | TP: 0 | SL: 0 | Trade: 0";
+  }
+  const reasons = perfSummary.close_reasons ?? {};
+  let tp = 0, sl = 0;
+  for (const [key, val] of Object.entries(reasons)) {
+    const k = key.toLowerCase();
+    if (k.includes("take profit") || k.includes("take_profit")) tp += val;
+    else if (k.includes("stop loss") || k.includes("stop_loss")) sl += val;
+  }
+  const wr = perfSummary.win_rate_pct != null ? `${perfSummary.win_rate_pct}%` : "N/A";
+  const pnlLine = perfSummary.total_pnl_usd != null ? ` | PnL: $${perfSummary.total_pnl_usd.toFixed(2)}` : "";
+  return `WR: ${wr} | TP: ${tp} | SL: ${sl} | Trade: ${perfSummary.total_trades_closed}${pnlLine}`;
 }
 
 async function refreshOpenTradeSnapshots(openTrades) {
@@ -189,29 +324,35 @@ export async function runManagementCycle({ silent = false } = {}) {
       actionMap.set(trade.tradeId, { action: "HOLD" });
     }
 
-    const reportLines = openTrades.map((trade) => {
+    const needsAction = [...actionMap.values()].filter((a) => a.action !== "HOLD" && a.action !== "INSTRUCTION");
+    const overallStatus = needsAction.length > 0 ? "CLOSE" : "HOLD";
+
+    const tradeLines = openTrades.map((trade) => {
       const act = actionMap.get(trade.tradeId);
-      const pnl = trade.lastPnlPct != null ? `${trade.lastPnlPct.toFixed(2)}%` : "?";
+      const pnl = trade.lastPnlPct != null ? `${trade.lastPnlPct >= 0 ? "+" : ""}${trade.lastPnlPct.toFixed(2)}%` : "?";
       const minutesHeld = trade.openedAt ? Math.floor((Date.now() - new Date(trade.openedAt).getTime()) / 60_000) : "?";
-      const trailingTag = trade.trailingActive ? " [trailing]" : "";
-      const statusLabel = act.action === "INSTRUCTION" ? "EVAL (instruction)" : act.action;
-      let line = `**${trade.symbol} ${trade.direction.toUpperCase()}** | ${trade.tradeId} | Entry: ${trade.entryPrice} | Qty: ${trade.quantity} | SL: ${trade.stopLoss} | TP: ${trade.takeProfit ?? "none"} | PnL: ${pnl}${trailingTag} | Age: ${minutesHeld}m | ${statusLabel}`;
-      if (trade.instruction) line += `\nNote: "${trade.instruction}"`;
-      if (act.action === "CLOSE") line += `\n→ ${act.rule}: ${act.reason}`;
+      const trailingTag = trade.trailingActive ? " trailing" : "";
+      const statusLabel = act.action === "INSTRUCTION" ? "EVAL" : act.action;
+      let line = `- ${trade.symbol} ${trade.direction.toUpperCase()} | PnL: ${pnl}${trailingTag} | Age: ${minutesHeld}m | ${statusLabel}`;
+      if (act.action === "CLOSE") line += ` (${act.rule}: ${act.reason})`;
+      if (trade.instruction) line += `\n  Note: "${trade.instruction}"`;
       return line;
     });
 
-    const needsAction = [...actionMap.values()].filter((a) => a.action !== "HOLD");
+    const perfSnap = formatPerfSnapshot(getPerformanceSummary());
     const actionSummary = needsAction.length > 0
-      ? needsAction.map((a) => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action} (${a.reason ?? ""})`).join(", ")
-      : "all HOLD";
+      ? `Closing ${needsAction.length} trade(s)`
+      : `All ${openTrades.length} position(s) held`;
 
-    const today = getTodayStats();
-    const todayLine = today
-      ? `Today: ${today.tradesOpened ?? 0} opened, ${today.tradesClosed ?? 0} closed, P&L: $${(today.pnlUsd ?? 0).toFixed(2)}`
-      : "No trades today yet";
-
-    mgmtReport = reportLines.join("\n\n") + `\n\nSummary: 💼 ${openTrades.length} open trade(s) | ${actionSummary} | ${todayLine}`;
+    mgmtReport = [
+      `${config.instrument.symbol} ${config.market.timeframe} | ${overallStatus}`,
+      "",
+      perfSnap,
+      "",
+      tradeLines.join("\n"),
+      "",
+      `Action: ${actionSummary}`,
+    ].join("\n");
 
     const actionTrades = openTrades.filter((t) => actionMap.get(t.tradeId).action !== "HOLD");
 
@@ -240,10 +381,10 @@ RULES:
 - CLOSE: call get_market_data to get the current price, then call close_trade with trade_id and the current bid (long) or ask (short) as exit_price.
 - INSTRUCTION: evaluate the instruction condition. If met → call get_market_data then close_trade with current market price. If not met → HOLD, do nothing.
 
-Execute the required actions. After executing, write a brief one-line result per trade.
+Execute the required actions. Then output 2-4 short bullet points explaining what happened, followed by one Action line. Plain text only, no markdown.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048);
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += `\n\n${stripThink(content)}`;
     } else {
       log("cron", "Management: all trades HOLD — skipping LLM");
     }
@@ -262,7 +403,7 @@ Execute the required actions. After executing, write a brief one-line result per
   } finally {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
-      if (mgmtReport) sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => {});
+      if (mgmtReport) sendMessage(mgmtReport).catch(() => {});
     }
   }
   return mgmtReport;
@@ -338,29 +479,45 @@ ${openBlock}
 STEPS:
 1. Call get_session_info to confirm we are in an active trading window.
 2. Call check_cooldown to confirm no cooldown is blocking new entries.
-3. Call get_market_data to fetch current price, bid, ask, and candle context.
-4. Call get_atr to assess current ATR-based volatility context.
-5. Assess whether a valid setup is present based on available data.
+3. Call get_market_data — it returns price, bid/ask, candles, and indicators (EMA20/50/200, RSI14, ATR14, Range, volume spike).
+4. Call get_account_balance to get available USDT balance.
+5. Assess whether a valid setup is present based on indicators and available data.
 6. If a valid setup exists AND all guards pass:
    - Call open_trade with: symbol, direction ("long"/"short"), entry_price, quantity, stop_loss (required), take_profit (optional).
    - Only enter if risk_reward >= ${config.signal.minRiskReward}.
-7. Report in this format:
-   Decision: OPEN TRADE | HOLD | NO SETUP
-   session: <active window or "outside window">
-   setup: <setup type or "none identified">
-   entry: <price> | SL: <price> | TP: <price> | RR: <ratio>
-   sizing: <quantity> ${config.instrument.baseAsset} | quote notional: <value> ${config.instrument.quoteAsset}
-   analysis: <2-4 sentences on why this setup was taken or passed>
+7. Output ONLY plain text in this exact format. No markdown, no bold, no headers:
+
+${config.instrument.symbol} ${config.market.timeframe} | <OPEN TRADE | HOLD | NO SETUP>
+Mode: ${config.paper.enabled ? "PAPER" : "LIVE"}
+
+Harga: <price from get_market_data>
+EMA20/50/200: <indicators.ema20 or N/A> / <indicators.ema50 or N/A> / <indicators.ema200 or N/A>
+RSI14: <indicators.rsi14 or N/A>
+ATR14: <indicators.atr14 or N/A>
+Range: <indicators.low20 or N/A> - <indicators.high20 or N/A>
+Saldo: <available_balance_usd from get_account_balance> USDT
+
+Entry: <entry_price if trade opened, else ->
+SL: <stop_loss if trade opened, else ->
+TP: <take_profit if trade opened, else ->
+RR: <risk_reward if trade opened, else ->
+
+WR: <win rate % or N/A> | TP: <tp_count> | SL: <sl_count> | Trade: <total_closed>
+Aksi: <one short action line>
     `, config.llm.maxSteps, [], "ANALYST", config.llm.analysisModel, 2048);
 
-    analysisReport = content;
+    analysisReport = formatAnalystOutput(content, {
+      symbol:    config.instrument.symbol,
+      timeframe: config.market.timeframe,
+      paperMode: config.paper.enabled,
+    });
   } catch (error) {
     log("cron_error", `Analysis cycle failed: ${error.message}`);
     analysisReport = `Analysis cycle failed: ${error.message}`;
   } finally {
     _analysisBusy = false;
     if (!silent && telegramEnabled()) {
-      if (analysisReport) sendMessage(`🔍 Analysis Cycle\n\n${stripThink(analysisReport)}`).catch(() => {});
+      if (analysisReport) sendMessage(stripThink(analysisReport)).catch(() => {});
     }
   }
   return analysisReport;
