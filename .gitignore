@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# User config and local secrets
+user-config.json
+
+# Runtime state (trade tracking, lessons, local strategy storage)
+state.json
+lessons.json
+strategy-library.json
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+
+# Dev context
+context.md
+
+# Playwright MCP browser logs
+.playwright-mcp/
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock

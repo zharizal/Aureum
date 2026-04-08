@@ -1,0 +1,63 @@
+{
+  "preset": "balanced",
+  "llmBaseUrl": "",
+  "llmApiKey": "",
+  "llmModel": "openai/gpt-oss-20b:free",
+  "dryRun": true,
+
+  "exchange": "Tokocrypto",
+  "symbol": "XAUT/USDT",
+  "baseAsset": "XAUT",
+  "quoteAsset": "USDT",
+  "pricePrecision": 2,
+  "quantityPrecision": 4,
+  "minQuantity": 0.0001,
+  "minNotional": 10,
+
+  "timeframe": "15m",
+  "atrPeriod": 14,
+  "minAtrMultiplierForEntry": 0.5,
+  "minRiskReward": 1.5,
+  "minAdxForTrend": 25,
+  "maxAdxForRange": 20,
+  "requireSessionConfirm": true,
+  "sessionFilterEnabled": true,
+  "maxSpreadPct": 0.25,
+
+  "maxOpenTrades": 2,
+  "riskPctPerTrade": 1,
+  "maxDailyLossPct": 3,
+  "maxDrawdownPct": 10,
+  "minAccountBalance": 100,
+  "maxPositionQuantity": 1,
+  "maxPositionNotional": 5000,
+
+  "stopLossPct": -2,
+  "takeProfitPct": 3,
+  "trailingStop": true,
+  "trailingTriggerPct": 1,
+  "trailingDropPct": 0.5,
+  "maxIdleMinutes": 240,
+
+  "cooldownAfterLossMinutes": 30,
+  "cooldownAfterTradeMinutes": 5,
+  "maxTradesPerHour": 3,
+  "maxTradesPerDay": 10,
+
+  "managementIntervalMin": 5,
+  "analysisIntervalMin": 15,
+
+  "paperTrading": true,
+  "paperBalance": 10000,
+  "simulateSlippage": 0.02,
+  "feeRatePct": 0.1,
+
+  "managementModel": "openai/gpt-oss-20b:free",
+  "analysisModel": "openai/gpt-oss-20b:free",
+  "generalModel": "openai/gpt-oss-20b:free",
+  "temperature": 0.3,
+  "maxTokens": 4096,
+  "maxSteps": 20,
+
+  "telegramChatId": ""
+}

@@ -1,0 +1,25 @@
+{
+  "name": "aureum",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Autonomous XAUT/USDT spot trading agent for Tokocrypto",
+  "main": "index.js",
+  "bin": {
+    "aureum": "cli.js"
+  },
+  "scripts": {
+    "setup": "node setup.js",
+    "start": "node index.js",
+    "dev": "DRY_RUN=true node index.js",
+    "test:agent": "DRY_RUN=true node test/test-agent.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "node-cron": "^3.0.3",
+    "jsonrepair": "^3.13.3",
+    "openai": "^4.73.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
