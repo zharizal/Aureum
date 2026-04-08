@@ -36,6 +36,7 @@ import {
   notifyTradeClose,
 } from "../telegram.js";
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -121,52 +122,128 @@ function buildPaperMarketData({ symbol = config.instrument.symbol, timeframe = c
   };
 }
 
+// ─── Live market-data helpers (Binance-format REST API) ──────────────────────
+
+function toApiSymbol(symbol) {
+  return symbol.replace(/[\/\-_\s]/g, "").toUpperCase();
+}
+
+function toKlineInterval(timeframe) {
+  return String(timeframe).trim().toLowerCase();
+}
+
+async function fetchLiveMarketData(symbol, timeframe) {
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const apiSymbol = toApiSymbol(symbol);
+  const interval = toKlineInterval(timeframe);
+  const signal = AbortSignal.timeout(10_000);
+
+  const [tickerRes, klinesRes] = await Promise.all([
+    fetch(`${base}/api/v3/ticker/bookTicker?symbol=${apiSymbol}`, { signal }),
+    fetch(`${base}/api/v3/klines?symbol=${apiSymbol}&interval=${interval}&limit=20`, { signal }),
+  ]);
+
+  if (!tickerRes.ok) throw new Error(`Ticker: HTTP ${tickerRes.status}`);
+  if (!klinesRes.ok) throw new Error(`Klines: HTTP ${klinesRes.status}`);
+
+  const ticker = await tickerRes.json();
+  const rawKlines = await klinesRes.json();
+
+  const bid = Number(ticker.bidPrice);
+  const ask = Number(ticker.askPrice);
+  const price = roundTo((bid + ask) / 2, config.instrument.pricePrecision);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("Invalid bid/ask from API — cannot derive price");
+  }
+
+  const candles = rawKlines.map((k) => ({
+    timestamp: new Date(k[0]).toISOString(),
+    open: Number(k[1]),
+    high: Number(k[2]),
+    low: Number(k[3]),
+    close: Number(k[4]),
+    volume: Number(k[5]),
+  }));
+
+  return {
+    success: true,
+    live: true,
+    exchange: config.instrument.exchange,
+    symbol,
+    timeframe,
+    price,
+    bid: roundTo(bid, config.instrument.pricePrecision),
+    ask: roundTo(ask, config.instrument.pricePrecision),
+    spreadPct: price > 0 ? roundTo(((ask - bid) / price) * 100, 4) : 0,
+    timestamp: new Date().toISOString(),
+    candles,
+  };
+}
+
+// ─── getMarketData: custom URL → Binance-format live → paper fallback ────────
+
 async function getMarketData({ symbol = config.instrument.symbol, timeframe = config.market.timeframe } = {}) {
-  const liveUrl = process.env.TOKOCRYPTO_MARKET_DATA_URL;
+  // Path 1: Legacy custom URL override (TOKOCRYPTO_MARKET_DATA_URL)
+  const customUrl = process.env.TOKOCRYPTO_MARKET_DATA_URL;
+  if (customUrl) {
+    try {
+      const separator = customUrl.includes("?") ? "&" : "?";
+      const response = await fetch(`${customUrl}${separator}symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-  if (!liveUrl) {
-    return buildPaperMarketData({ symbol, timeframe });
+      const payload = await response.json();
+      const price = Number(payload.price ?? payload.lastPrice ?? payload.last ?? payload.close);
+      const bid = Number(payload.bid ?? payload.bestBid ?? price);
+      const ask = Number(payload.ask ?? payload.bestAsk ?? price);
+      const spreadPct = Number.isFinite(payload.spreadPct)
+        ? Number(payload.spreadPct)
+        : (price > 0 ? ((ask - bid) / price) * 100 : 0);
+
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(bid) || !Number.isFinite(ask)) {
+        throw new Error("Custom endpoint payload missing numeric price/bid/ask");
+      }
+
+      return {
+        success: true,
+        live: true,
+        exchange: config.instrument.exchange,
+        symbol,
+        timeframe,
+        price: roundTo(price, config.instrument.pricePrecision),
+        bid: roundTo(bid, config.instrument.pricePrecision),
+        ask: roundTo(ask, config.instrument.pricePrecision),
+        spreadPct: roundTo(spreadPct, 4),
+        timestamp: payload.timestamp ?? payload.time ?? new Date().toISOString(),
+        candles: Array.isArray(payload.candles) ? payload.candles : buildSyntheticCandles({ price, timeframe }),
+      };
+    } catch (error) {
+      return {
+        ...buildPaperMarketData({ symbol, timeframe }),
+        liveFallback: true,
+        note: `Paper fallback — custom endpoint failed: ${error.message}`,
+      };
+    }
   }
 
-  try {
-    const separator = liveUrl.includes("?") ? "&" : "?";
-    const response = await fetch(`${liveUrl}${separator}symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+  // Path 2: Binance-format REST API (Tokocrypto / Binance public)
+  // Non-paper mode: always try (defaults to api.binance.com)
+  // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set
+  if (!config.paper.enabled || process.env.TOKOCRYPTO_API_URL) {
+    try {
+      return await fetchLiveMarketData(symbol, timeframe);
+    } catch (error) {
+      log("market", `Live market data failed: ${error.message}`);
+      return {
+        ...buildPaperMarketData({ symbol, timeframe }),
+        liveFallback: true,
+        note: `Paper fallback — live API failed: ${error.message}`,
+      };
     }
-
-    const payload = await response.json();
-    const price = Number(payload.price ?? payload.lastPrice ?? payload.last ?? payload.close);
-    const bid = Number(payload.bid ?? payload.bestBid ?? price);
-    const ask = Number(payload.ask ?? payload.bestAsk ?? price);
-    const spreadPct = Number.isFinite(payload.spreadPct)
-      ? Number(payload.spreadPct)
-      : (price > 0 ? ((ask - bid) / price) * 100 : 0);
-
-    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(bid) || !Number.isFinite(ask)) {
-      throw new Error("Live payload missing numeric price/bid/ask fields");
-    }
-
-    return {
-      success: true,
-      live: true,
-      exchange: config.instrument.exchange,
-      symbol,
-      timeframe,
-      price: roundTo(price, config.instrument.pricePrecision),
-      bid: roundTo(bid, config.instrument.pricePrecision),
-      ask: roundTo(ask, config.instrument.pricePrecision),
-      spreadPct: roundTo(spreadPct, 4),
-      timestamp: payload.timestamp ?? payload.time ?? new Date().toISOString(),
-      candles: Array.isArray(payload.candles) ? payload.candles : buildSyntheticCandles({ price, timeframe }),
-    };
-  } catch (error) {
-    return {
-      ...buildPaperMarketData({ symbol, timeframe }),
-      liveFallback: true,
-      note: `Paper fallback used because live market data fetch failed: ${error.message}`,
-    };
   }
+
+  // Path 3: Paper-only fallback
+  return buildPaperMarketData({ symbol, timeframe });
 }
 
 async function paperOpenTrade({ tradeId, symbol, direction, entryPrice, quantity, stopLoss, takeProfit, setupType, session, atrAtEntry, riskReward, signalSnapshot }) {
@@ -290,6 +367,375 @@ async function paperCloseTrade({ tradeId, exitPrice, reason }) {
   };
 }
 
+// ─── Live order helpers (Binance-format signed API) ──────────────────────────
+
+async function placeMarketOrder(symbol, side, quantity) {
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const apiKey = process.env.TOKOCRYPTO_API_KEY;
+  const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+  if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
+
+  const apiSymbol = toApiSymbol(symbol);
+  const timestamp = Date.now();
+  const qs = `symbol=${apiSymbol}&side=${side.toUpperCase()}&type=MARKET&quantity=${quantity}&timestamp=${timestamp}&recvWindow=10000`;
+  const signature = signQuery(qs, apiSecret);
+  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const signal = AbortSignal.timeout(10_000);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "X-MBX-APIKEY": apiKey },
+    signal,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Order HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  return res.json();
+}
+
+async function getOrderStatus(symbol, orderId) {
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const apiKey = process.env.TOKOCRYPTO_API_KEY;
+  const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+  if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
+
+  const apiSymbol = toApiSymbol(symbol);
+  const timestamp = Date.now();
+  const qs = `symbol=${apiSymbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=10000`;
+  const signature = signQuery(qs, apiSecret);
+  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const signal = AbortSignal.timeout(10_000);
+
+  const res = await fetch(url, {
+    headers: { "X-MBX-APIKEY": apiKey },
+    signal,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`OrderStatus HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  return res.json();
+}
+
+async function cancelOrder(symbol, orderId) {
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const apiKey = process.env.TOKOCRYPTO_API_KEY;
+  const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+  if (!apiKey || !apiSecret) throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required");
+
+  const apiSymbol = toApiSymbol(symbol);
+  const timestamp = Date.now();
+  const qs = `symbol=${apiSymbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=10000`;
+  const signature = signQuery(qs, apiSecret);
+  const url = `${base}/api/v3/order?${qs}&signature=${signature}`;
+  const signal = AbortSignal.timeout(10_000);
+
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { "X-MBX-APIKEY": apiKey },
+    signal,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`CancelOrder HTTP ${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  return res.json();
+}
+
+function extractFillPrice(orderResult) {
+  // Binance MARKET orders return fills[] with price/qty per fill
+  if (Array.isArray(orderResult.fills) && orderResult.fills.length > 0) {
+    let totalQty = 0;
+    let totalNotional = 0;
+    for (const fill of orderResult.fills) {
+      const qty = Number(fill.qty);
+      const price = Number(fill.price);
+      totalQty += qty;
+      totalNotional += qty * price;
+    }
+    return totalQty > 0 ? roundTo(totalNotional / totalQty, config.instrument.pricePrecision) : 0;
+  }
+  // Fallback to cummulativeQuoteQty / executedQty
+  const execQty = Number(orderResult.executedQty);
+  const cumQuote = Number(orderResult.cummulativeQuoteQty);
+  if (execQty > 0 && cumQuote > 0) return roundTo(cumQuote / execQty, config.instrument.pricePrecision);
+  return 0;
+}
+
+function extractFillFee(orderResult) {
+  if (!Array.isArray(orderResult.fills)) return 0;
+  let totalFee = 0;
+  for (const fill of orderResult.fills) {
+    // Binance reports commission in commissionAsset — approximate USD value
+    totalFee += Number(fill.commission ?? 0);
+  }
+  return roundTo(totalFee, 6);
+}
+
+async function liveOpenTrade({ tradeId, symbol, direction, entryPrice, quantity, stopLoss, takeProfit, setupType, session, atrAtEntry, riskReward, signalSnapshot }) {
+  const { trackTrade, recordTradeOpened } = await import("../state.js");
+  const normalizedQuantity = normalizeQuantity(quantity);
+  const side = direction === "long" ? "BUY" : "SELL";
+
+  const orderResult = await placeMarketOrder(symbol, side, normalizedQuantity);
+
+  if (orderResult.status !== "FILLED") {
+    return {
+      success: false,
+      error: `Order not filled — status: ${orderResult.status}`,
+      orderId: orderResult.orderId,
+      orderResult,
+    };
+  }
+
+  const fillPrice = extractFillPrice(orderResult);
+  const executedQty = normalizeQuantity(Number(orderResult.executedQty));
+  const notionalUsd = roundTo(fillPrice * executedQty, 2);
+  const feeUsd = extractFillFee(orderResult);
+
+  trackTrade({
+    tradeId,
+    symbol,
+    direction,
+    entryPrice: fillPrice,
+    quantity: executedQty,
+    notionalUsd,
+    stopLoss,
+    takeProfit,
+    setupType,
+    session,
+    atrAtEntry,
+    riskReward,
+    signalSnapshot,
+    entryFillPrice: fillPrice,
+    entryFeeUsd: feeUsd,
+    reservedQuoteUsd: roundTo(notionalUsd + feeUsd, 2),
+    orderId: orderResult.orderId,
+    live: true,
+  });
+  recordTradeOpened();
+
+  log("trade", `LIVE ${direction} opened: ${symbol} qty=${executedQty} fill=${fillPrice} orderId=${orderResult.orderId}`);
+
+  return {
+    success: true,
+    live: true,
+    tradeId,
+    symbol,
+    direction,
+    entryPrice: fillPrice,
+    quantity: executedQty,
+    notionalUsd,
+    stopLoss,
+    takeProfit,
+    feeUsd,
+    orderId: orderResult.orderId,
+    orderStatus: orderResult.status,
+  };
+}
+
+async function liveCloseTrade({ tradeId, exitPrice, reason }) {
+  const { getTrackedTrade, recordClose } = await import("../state.js");
+  const trade = getTrackedTrade(tradeId);
+  if (!trade) return { success: false, error: `Trade ${tradeId} not found in state` };
+  if (trade.closed) return { success: false, error: `Trade ${tradeId} is already closed` };
+
+  const quantity = normalizeQuantity(trade.quantity ?? 0);
+  // To close a long, sell the base asset; to close a short, buy it back
+  const side = trade.direction === "long" ? "SELL" : "BUY";
+
+  const orderResult = await placeMarketOrder(trade.symbol, side, quantity);
+
+  if (orderResult.status !== "FILLED") {
+    return {
+      success: false,
+      error: `Close order not filled — status: ${orderResult.status}`,
+      orderId: orderResult.orderId,
+      orderResult,
+    };
+  }
+
+  const fillPrice = extractFillPrice(orderResult);
+  const executedQty = normalizeQuantity(Number(orderResult.executedQty));
+  const exitFeeUsd = extractFillFee(orderResult);
+  const entryFeeUsd = trade.entryFeeUsd ?? 0;
+  const grossPnl = trade.direction === "long"
+    ? (fillPrice - (trade.entryFillPrice ?? trade.entryPrice)) * executedQty
+    : ((trade.entryFillPrice ?? trade.entryPrice) - fillPrice) * executedQty;
+  const pnlUsd = roundTo(grossPnl - entryFeeUsd - exitFeeUsd, 2);
+  const entryRef = trade.entryFillPrice ?? trade.entryPrice;
+  const pnlPct = entryRef > 0
+    ? roundTo(((trade.direction === "long" ? fillPrice - entryRef : entryRef - fillPrice) / entryRef) * 100, 4)
+    : 0;
+
+  recordClose(tradeId, reason || "agent_decision", {
+    exitFillPrice: fillPrice,
+    exitFeeUsd,
+    realizedPnlUsd: pnlUsd,
+    unrealizedPnlUsd: 0,
+    orderId: orderResult.orderId,
+    live: true,
+  });
+  recordDailyPnl(pnlUsd);
+  recordTradeClosed(pnlUsd < 0);
+
+  log("trade", `LIVE ${trade.direction} closed: ${trade.symbol} qty=${executedQty} fill=${fillPrice} pnl=${pnlUsd} orderId=${orderResult.orderId}`);
+
+  return {
+    success: true,
+    live: true,
+    tradeId,
+    symbol: trade.symbol,
+    direction: trade.direction,
+    entryPrice: entryRef,
+    exitPrice: fillPrice,
+    quantity: executedQty,
+    notionalUsd: roundTo(fillPrice * executedQty, 2),
+    pnlUsd,
+    pnlPct,
+    feesUsd: roundTo(entryFeeUsd + exitFeeUsd, 2),
+    exitFeeUsd,
+    reason: reason || "agent_decision",
+    orderId: orderResult.orderId,
+    orderStatus: orderResult.status,
+  };
+}
+
+// ─── Live-trading safety guard ───────────────────────────────────────────────
+const _liveOpeningLocks = new Set();
+const _liveClosingLocks = new Set();
+
+function isLiveModeExplicitlyEnabled() {
+  // Fail-closed: paper must be disabled AND an explicit live env flag must be set.
+  return !config.paper.enabled && process.env.TOKOCRYPTO_LIVE === "true";
+}
+
+async function validateLiveOpenGuard({ symbol, direction, quantity, entryPrice }) {
+  if (!isLiveModeExplicitlyEnabled()) {
+    return { ok: false, reason: "live mode not explicitly enabled (require paper.enabled=false AND env TOKOCRYPTO_LIVE=true)" };
+  }
+  if (!process.env.TOKOCRYPTO_API_KEY || !process.env.TOKOCRYPTO_API_SECRET) {
+    return { ok: false, reason: "TOKOCRYPTO_API_KEY / TOKOCRYPTO_API_SECRET not set" };
+  }
+  if (symbol !== config.instrument.symbol) {
+    return { ok: false, reason: `symbol mismatch: ${symbol} != configured ${config.instrument.symbol}` };
+  }
+  if (direction !== "long" && direction !== "short") {
+    return { ok: false, reason: `invalid direction: ${direction}` };
+  }
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return { ok: false, reason: `invalid quantity: ${quantity}` };
+  }
+  if (qty < config.instrument.minQuantity) {
+    return { ok: false, reason: `quantity ${qty} < minQuantity ${config.instrument.minQuantity}` };
+  }
+  const px = Number(entryPrice);
+  if (!Number.isFinite(px) || px <= 0) {
+    return { ok: false, reason: `invalid entry price: ${entryPrice}` };
+  }
+  const notional = qty * px;
+  if (notional < config.instrument.minNotional) {
+    return { ok: false, reason: `notional ${notional} < minNotional ${config.instrument.minNotional}` };
+  }
+  if (notional > config.risk.maxPositionNotional) {
+    return { ok: false, reason: `notional ${notional} > maxPositionNotional ${config.risk.maxPositionNotional}` };
+  }
+  const openTrades = getTrackedTrades(true);
+  if (openTrades.length >= config.risk.maxOpenTrades) {
+    return { ok: false, reason: `open trades ${openTrades.length} >= maxOpenTrades ${config.risk.maxOpenTrades}` };
+  }
+  const cd = checkCooldown(config.cooldown);
+  if (cd.blocked) {
+    return { ok: false, reason: `cooldown blocked: ${cd.reason}` };
+  }
+  // Fresh market data + spread check
+  let market;
+  try {
+    market = await fetchLiveMarketData(symbol, config.market.timeframe);
+  } catch (e) {
+    return { ok: false, reason: `fresh market data fetch failed: ${e.message}` };
+  }
+  const marketAgeMs = Date.now() - new Date(market.timestamp).getTime();
+  if (!Number.isFinite(marketAgeMs) || marketAgeMs > (config.market.stalePriceMaxMs ?? 30_000)) {
+    return { ok: false, reason: `market data stale: ${marketAgeMs}ms` };
+  }
+  if (!Number.isFinite(market.spreadPct) || market.spreadPct > (config.market.maxSpreadPct ?? 0.25)) {
+    return { ok: false, reason: `spreadPct ${market.spreadPct} > maxSpreadPct ${config.market.maxSpreadPct}` };
+  }
+  // Fresh account data + balance sanity check
+  let account;
+  try {
+    account = await fetchLiveAccountBalance();
+  } catch (e) {
+    return { ok: false, reason: `fresh account data fetch failed: ${e.message}` };
+  }
+  const quoteBal = account.balances?.find((b) => b.asset === config.instrument.quoteAsset);
+  const quoteAvailable = Number(quoteBal?.free ?? 0);
+  if (!Number.isFinite(quoteAvailable) || quoteAvailable < notional) {
+    return { ok: false, reason: `available ${config.instrument.quoteAsset} ${quoteAvailable} < required notional ${notional}` };
+  }
+  return { ok: true, reason: null };
+}
+
+async function validateLiveCloseGuard({ tradeId }) {
+  if (!isLiveModeExplicitlyEnabled()) {
+    return { ok: false, reason: "live mode not explicitly enabled (require paper.enabled=false AND env TOKOCRYPTO_LIVE=true)" };
+  }
+  if (!process.env.TOKOCRYPTO_API_KEY || !process.env.TOKOCRYPTO_API_SECRET) {
+    return { ok: false, reason: "TOKOCRYPTO_API_KEY / TOKOCRYPTO_API_SECRET not set" };
+  }
+  if (!tradeId) {
+    return { ok: false, reason: "missing tradeId" };
+  }
+  const { getTrackedTrade } = await import("../state.js");
+  const trade = getTrackedTrade(tradeId);
+  if (!trade) {
+    return { ok: false, reason: `trade ${tradeId} not found in state` };
+  }
+  if (trade.closed) {
+    return { ok: false, reason: `trade ${tradeId} is already closed` };
+  }
+  if (trade.symbol !== config.instrument.symbol) {
+    return { ok: false, reason: `trade symbol ${trade.symbol} != configured ${config.instrument.symbol}` };
+  }
+  const qty = Number(trade.quantity);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return { ok: false, reason: `invalid tracked quantity: ${trade.quantity}` };
+  }
+  if (qty < config.instrument.minQuantity) {
+    return { ok: false, reason: `tracked quantity ${qty} < minQuantity ${config.instrument.minQuantity}` };
+  }
+  // Fresh market data + spread check
+  let market;
+  try {
+    market = await fetchLiveMarketData(trade.symbol, config.market.timeframe);
+  } catch (e) {
+    return { ok: false, reason: `fresh market data fetch failed: ${e.message}` };
+  }
+  const marketAgeMs = Date.now() - new Date(market.timestamp).getTime();
+  if (!Number.isFinite(marketAgeMs) || marketAgeMs > (config.market.stalePriceMaxMs ?? 30_000)) {
+    return { ok: false, reason: `market data stale: ${marketAgeMs}ms` };
+  }
+  if (!Number.isFinite(market.spreadPct) || market.spreadPct > (config.market.maxSpreadPct ?? 0.25)) {
+    return { ok: false, reason: `spreadPct ${market.spreadPct} > maxSpreadPct ${config.market.maxSpreadPct}` };
+  }
+  // Fresh account data sanity
+  try {
+    await fetchLiveAccountBalance();
+  } catch (e) {
+    return { ok: false, reason: `fresh account data fetch failed: ${e.message}` };
+  }
+  return { ok: true, reason: null };
+}
+
 async function openTrade(args) {
   const {
     symbol = config.instrument.symbol,
@@ -324,10 +770,59 @@ async function openTrade(args) {
     });
   }
 
-  return {
-    success: false,
-    error: "Live Tokocrypto execution not yet implemented. Set paper.enabled=true or DRY_RUN=true to use paper mode.",
-  };
+  // Live path — run strict safety guard before any order hits the exchange
+  const guard = await validateLiveOpenGuard({
+    symbol,
+    direction,
+    quantity,
+    entryPrice: entry_price,
+  });
+  if (!guard.ok) {
+    log("trade", `Live open_trade blocked by guard: ${guard.reason}`);
+    return {
+      success: false,
+      error: `Live guard blocked open: ${guard.reason}`,
+      note: "State was NOT modified — no order placed.",
+    };
+  }
+
+  // Duplicate-open prevention: only one live open in flight per symbol+direction
+  const openLockKey = `${symbol}|${direction}`;
+  if (_liveOpeningLocks.has(openLockKey)) {
+    log("trade", `Live open_trade blocked: duplicate in-flight for ${openLockKey}`);
+    return {
+      success: false,
+      error: `Live guard blocked open: duplicate open already in progress for ${openLockKey}`,
+      note: "State was NOT modified — no order placed.",
+    };
+  }
+  _liveOpeningLocks.add(openLockKey);
+
+  try {
+    return await liveOpenTrade({
+      tradeId,
+      symbol,
+      direction,
+      entryPrice: entry_price,
+      quantity,
+      stopLoss: stop_loss,
+      takeProfit: take_profit,
+      setupType: setup_type,
+      session,
+      atrAtEntry: atr_at_entry,
+      riskReward: risk_reward,
+      signalSnapshot: signal_snapshot,
+    });
+  } catch (error) {
+    log("trade", `Live open_trade failed: ${error.message}`);
+    return {
+      success: false,
+      error: `Live order failed: ${error.message}`,
+      note: "State was NOT modified — no trade was tracked.",
+    };
+  } finally {
+    _liveOpeningLocks.delete(openLockKey);
+  }
 }
 
 async function closeTrade(args) {
@@ -337,10 +832,40 @@ async function closeTrade(args) {
     return paperCloseTrade({ tradeId: trade_id, exitPrice: exit_price, reason });
   }
 
-  return {
-    success: false,
-    error: "Live Tokocrypto execution not yet implemented. Set paper.enabled=true or DRY_RUN=true to use paper mode.",
-  };
+  // Live path — run strict safety guard before any close order hits the exchange
+  const guard = await validateLiveCloseGuard({ tradeId: trade_id });
+  if (!guard.ok) {
+    log("trade", `Live close_trade blocked by guard: ${guard.reason}`);
+    return {
+      success: false,
+      error: `Live guard blocked close: ${guard.reason}`,
+      note: "State was NOT modified — trade remains open.",
+    };
+  }
+
+  // Duplicate-close prevention: only one live close in flight per tradeId
+  if (_liveClosingLocks.has(trade_id)) {
+    log("trade", `Live close_trade blocked: duplicate in-flight for ${trade_id}`);
+    return {
+      success: false,
+      error: `Live guard blocked close: duplicate close already in progress for ${trade_id}`,
+      note: "State was NOT modified — trade remains open.",
+    };
+  }
+  _liveClosingLocks.add(trade_id);
+
+  try {
+    return await liveCloseTrade({ tradeId: trade_id, exitPrice: exit_price, reason });
+  } catch (error) {
+    log("trade", `Live close_trade failed: ${error.message}`);
+    return {
+      success: false,
+      error: `Live close order failed: ${error.message}`,
+      note: "State was NOT modified — trade remains open.",
+    };
+  } finally {
+    _liveClosingLocks.delete(trade_id);
+  }
 }
 
 async function getOpenTrades() {
@@ -426,15 +951,90 @@ function buildPaperAccountBalance() {
   };
 }
 
-async function getAccountBalance() {
-  const liveUrl = process.env.TOKOCRYPTO_ACCOUNT_URL;
+// ─── Live account balance (Binance-format signed API) ────────────────────────
 
-  if (!config.paper.enabled && liveUrl) {
+function signQuery(queryString, secret) {
+  return crypto.createHmac("sha256", secret).update(queryString).digest("hex");
+}
+
+async function fetchLiveAccountBalance() {
+  const base = (process.env.TOKOCRYPTO_API_URL || "https://api.binance.com").replace(/\/+$/, "");
+  const apiKey = process.env.TOKOCRYPTO_API_KEY;
+  const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+
+  if (!apiKey || !apiSecret) {
+    throw new Error("TOKOCRYPTO_API_KEY and TOKOCRYPTO_API_SECRET required for live account");
+  }
+
+  const timestamp = Date.now();
+  const qs = `timestamp=${timestamp}&recvWindow=10000`;
+  const signature = signQuery(qs, apiSecret);
+  const url = `${base}/api/v3/account?${qs}&signature=${signature}`;
+  const signal = AbortSignal.timeout(10_000);
+
+  const res = await fetch(url, {
+    headers: { "X-MBX-APIKEY": apiKey },
+    signal,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  return res.json();
+}
+
+function buildLiveAccountResult(account) {
+  const quoteAsset = config.instrument.quoteAsset;
+  const baseAsset = config.instrument.baseAsset;
+
+  const quoteBal = account.balances?.find((b) => b.asset === quoteAsset);
+  const baseBal = account.balances?.find((b) => b.asset === baseAsset);
+
+  const quoteTotal = roundTo(Number(quoteBal?.free ?? 0) + Number(quoteBal?.locked ?? 0), 2);
+  const quoteAvailable = roundTo(Number(quoteBal?.free ?? 0), 2);
+  const quoteLocked = roundTo(Number(quoteBal?.locked ?? 0), 2);
+
+  const baseTotal = roundTo(Number(baseBal?.free ?? 0) + Number(baseBal?.locked ?? 0), config.instrument.quantityPrecision);
+  const baseAvailable = roundTo(Number(baseBal?.free ?? 0), config.instrument.quantityPrecision);
+  const baseLocked = roundTo(Number(baseBal?.locked ?? 0), config.instrument.quantityPrecision);
+
+  return {
+    success: true,
+    live: true,
+    exchange: config.instrument.exchange,
+    symbol: config.instrument.symbol,
+    canOpenTrade: quoteAvailable >= config.instrument.minNotional,
+    balances: {
+      [quoteAsset]: { asset: quoteAsset, total: quoteTotal, available: quoteAvailable, locked: quoteLocked },
+      [baseAsset]: { asset: baseAsset, total: baseTotal, available: baseAvailable, locked: baseLocked },
+    },
+    quote_asset: quoteAsset,
+    base_asset: baseAsset,
+    balance_usd: quoteTotal,
+    available_balance_usd: quoteAvailable,
+    reserved_balance_usd: quoteLocked,
+    min_notional_usd: config.instrument.minNotional,
+    open_trade_capacity: {
+      availableQuote: quoteAvailable,
+      minNotional: config.instrument.minNotional,
+      maxPositionNotional: config.risk.maxPositionNotional,
+      canOpenTrade: quoteAvailable >= config.instrument.minNotional,
+    },
+    canTrade: account.canTrade ?? true,
+  };
+}
+
+// ─── getAccountBalance: custom URL → Binance signed → paper fallback ─────────
+
+async function getAccountBalance() {
+  // Path 1: Legacy custom URL override (TOKOCRYPTO_ACCOUNT_URL)
+  const customUrl = process.env.TOKOCRYPTO_ACCOUNT_URL;
+  if (customUrl) {
     try {
-      const response = await fetch(liveUrl);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      const response = await fetch(customUrl);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = await response.json();
       return {
@@ -445,19 +1045,37 @@ async function getAccountBalance() {
         balances: payload.balances ?? payload,
         quote_asset: config.instrument.quoteAsset,
         base_asset: config.instrument.baseAsset,
-        note: "Live account balance fetched from configured account endpoint.",
+        note: "Live account balance fetched from custom endpoint.",
       };
     } catch (error) {
-      if (!config.paper.enabled) {
-        return {
-          ...buildPaperAccountBalance(),
-          liveFallback: true,
-          note: `Paper fallback used because live account fetch failed: ${error.message}`,
-        };
-      }
+      return {
+        ...buildPaperAccountBalance(),
+        liveFallback: true,
+        note: `Paper fallback — custom account endpoint failed: ${error.message}`,
+      };
     }
   }
 
+  // Path 2: Binance-format signed REST API
+  // Non-paper mode: try if API key/secret are set
+  // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set AND key/secret exist
+  const apiKey = process.env.TOKOCRYPTO_API_KEY;
+  const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+  if (apiKey && apiSecret && (!config.paper.enabled || process.env.TOKOCRYPTO_API_URL)) {
+    try {
+      const account = await fetchLiveAccountBalance();
+      return buildLiveAccountResult(account);
+    } catch (error) {
+      log("account", `Live account balance failed: ${error.message}`);
+      return {
+        ...buildPaperAccountBalance(),
+        liveFallback: true,
+        note: `Paper fallback — live account failed: ${error.message}`,
+      };
+    }
+  }
+
+  // Path 3: Paper-only fallback
   return buildPaperAccountBalance();
 }
 
@@ -476,7 +1094,7 @@ const toolMap = {
   get_market_data: getMarketData,
   get_atr: async ({ symbol = config.instrument.symbol, period } = {}) => {
     const atrPeriod = period ?? config.market.atrPeriod;
-    const marketData = buildPaperMarketData({ symbol, timeframe: config.market.timeframe });
+    const marketData = await getMarketData({ symbol, timeframe: config.market.timeframe });
     const candles = marketData.candles;
     if (!candles || candles.length < 2) {
       return { success: false, error: "Not enough candle data to compute ATR." };
@@ -493,13 +1111,16 @@ const toolMap = {
     const atr = roundTo(recent.reduce((sum, v) => sum + v, 0) / recent.length, config.instrument.pricePrecision);
     return {
       success: true,
-      paper: true,
+      live: marketData.live ?? false,
+      paper: marketData.paper ?? false,
       exchange: config.instrument.exchange,
       symbol,
       atr,
       period: effectivePeriod,
       price: marketData.price,
-      note: "ATR computed from synthetic paper candle data.",
+      note: marketData.live
+        ? "ATR computed from live candle data."
+        : "ATR computed from synthetic paper candle data.",
     };
   },
   get_session_info: async () => {
