@@ -62,8 +62,8 @@ function buildRiskLine(todayStats, openTrades, perfSummary) {
   const todayPnl = todayStats?.pnlUsd ?? 0;
   const allTimePnl = perfSummary?.total_pnl_usd ?? 0;
 
-  // When balance source is real exchange, skip percentage-based limits derived from paper initialBalance
-  if (config.paper.balanceSource === "real_exchange") {
+  // In LIVE mode or real_exchange paper mode: skip percentage-based limits derived from paper initialBalance
+  if (!config.paper.enabled || config.paper.balanceSource === "real_exchange") {
     const todayRiskStatus = todayPnl < 0 ? `daily PnL: $${todayPnl.toFixed(2)}` : "within daily risk";
     return `${openTrades.length}/${config.risk.maxOpenTrades} open trades | ${todayRiskStatus} | all-time PnL: $${allTimePnl.toFixed(2)}`;
   }
@@ -140,16 +140,23 @@ export async function generateBriefing() {
     const accountSnap = getAccountSnapshot();
     const quoteAsset = config.instrument.quoteAsset;
     const baseAsset = config.instrument.baseAsset;
-    const availUsdt = accountSnap.balances?.[quoteAsset]?.available ?? accountSnap.available_balance_usd ?? 0;
-    const totalUsdt = accountSnap.balances?.[quoteAsset]?.total ?? accountSnap.balance_usd ?? 0;
-    const availBase = accountSnap.available_base_asset ?? accountSnap.balances?.[baseAsset]?.available ?? 0;
-    const totalBase = accountSnap.total_base_asset ?? accountSnap.balances?.[baseAsset]?.total ?? 0;
-    const balSrc = accountSnap.balance_source ?? "MANUAL_PAPER";
+
+    // Debug: log briefing balance selection
+    log("briefing_debug", `[briefing] mode=${config.paper.enabled ? "PAPER" : "LIVE"} balance_source=${accountSnap.balance_source ?? "UNKNOWN"}`);
+    log("briefing_debug", `[briefing] raw_snap=${JSON.stringify({ success: accountSnap.success, live: accountSnap.live, balance_source: accountSnap.balance_source, balances: accountSnap.balances })}`);
+
+    const availUsdt = accountSnap.balances?.[quoteAsset]?.available ?? accountSnap.available_balance_usd ?? null;
+    const totalUsdt = accountSnap.balances?.[quoteAsset]?.total ?? accountSnap.balance_usd ?? null;
+    const availBase = accountSnap.available_base_asset ?? accountSnap.balances?.[baseAsset]?.available ?? null;
+    const totalBase = accountSnap.total_base_asset ?? accountSnap.balances?.[baseAsset]?.total ?? null;
+    const balSrc = accountSnap.balance_source ?? (accountSnap.live ? "LIVE" : "MANUAL_PAPER");
+
+    const fmtBalance = (v, decimals = 2) => v == null ? "N/A" : `$${Number(v).toFixed(decimals)}`;
     const balanceLine = [
-      `Available ${escapeHtml(quoteAsset)}: <b>$${Number(availUsdt).toFixed(2)}</b>`,
-      `Available ${escapeHtml(baseAsset)}: <b>${Number(availBase).toFixed(4)}</b>`,
-      `Total ${escapeHtml(baseAsset)} (incl. locked): <b>${Number(totalBase).toFixed(4)}</b>`,
-      `Total ${escapeHtml(quoteAsset)}: <b>$${Number(totalUsdt).toFixed(2)}</b>`,
+      `Available ${escapeHtml(quoteAsset)}: <b>${escapeHtml(fmtBalance(availUsdt, 2))}</b>`,
+      `Available ${escapeHtml(baseAsset)}: <b>${availBase == null ? "N/A" : Number(availBase).toFixed(4)}</b>`,
+      `Total ${escapeHtml(baseAsset)} (incl. locked): <b>${totalBase == null ? "N/A" : Number(totalBase).toFixed(4)}</b>`,
+      `Total ${escapeHtml(quoteAsset)}: <b>${escapeHtml(fmtBalance(totalUsdt, 2))}</b>`,
       `Balance source: ${escapeHtml(balSrc)}`,
     ].join(" | ");
 

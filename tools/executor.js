@@ -53,6 +53,10 @@ export function registerCronRestarter(fn) { _cronRestarter = fn; }
 // Updated by getAccountBalance(); read synchronously by buildPaperAccountBalance()
 let _realBalanceCache = { quoteAvailable: null, baseAvailable: null, lastFetchedMs: 0 };
 
+// Cache for last successful live account balance result (LIVE mode).
+// Written by getAccountBalance() Path 2b; read synchronously by getAccountSnapshot().
+let _lastLiveBalanceCache = null;
+
 function roundTo(value, decimals = 8) {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -1146,6 +1150,7 @@ function buildLiveAccountResult(account) {
       canOpenTrade: quoteAvailable >= config.instrument.minNotional,
     },
     canTrade: account.canTrade ?? true,
+    balance_source: "LIVE",
   };
 }
 
@@ -1248,6 +1253,8 @@ async function getAccountBalance() {
     try {
       const account = await fetchLiveAccountBalance();
       const r = buildLiveAccountResult(account);
+      // Cache for synchronous getAccountSnapshot() calls (briefing, summaries)
+      _lastLiveBalanceCache = r;
       _logBalanceDebug(r);
       return r;
     } catch (error) {
@@ -1277,11 +1284,39 @@ async function getAccountBalance() {
 }
 
 /**
- * Synchronous snapshot of the current account balance (paper mode).
+ * Synchronous snapshot of the current account balance.
+ * In LIVE mode: returns the last successful live balance fetched by getAccountBalance().
+ * In paper mode: computes balance from paper state.
  * Safe to call from briefing/summary contexts that cannot await getAccountBalance().
- * Returns the same shape as buildPaperAccountBalance().
  */
 export function getAccountSnapshot() {
+  if (!config.paper.enabled) {
+    if (_lastLiveBalanceCache !== null) {
+      log("balance_debug", `[getAccountSnapshot] LIVE mode — returning cached live balance (source=${_lastLiveBalanceCache.balance_source})`);
+      return _lastLiveBalanceCache;
+    }
+    // No live cache yet (no successful getAccountBalance() call since startup).
+    // Return a minimal sentinel so briefing displays "LIVE (no data yet)" rather than paper values.
+    log("balance_debug", "[getAccountSnapshot] LIVE mode — no cached live balance yet, returning empty live sentinel");
+    const quoteAsset = config.instrument.quoteAsset;
+    const baseAsset = config.instrument.baseAsset;
+    return {
+      success: false,
+      live: true,
+      balance_source: "LIVE_NO_DATA",
+      exchange: config.instrument.exchange,
+      symbol: config.instrument.symbol,
+      balances: {
+        [quoteAsset]: { asset: quoteAsset, total: null, available: null, locked: null },
+        [baseAsset]: { asset: baseAsset, total: null, available: null, locked: null },
+      },
+      available_base_asset: null,
+      total_base_asset: null,
+      available_quote_asset: null,
+      total_quote_asset: null,
+      note: "LIVE mode — balance not yet fetched. Run get_account_balance to populate.",
+    };
+  }
   return buildPaperAccountBalance();
 }
 
