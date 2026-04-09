@@ -7,7 +7,13 @@ export const tools = [
 
 Use this only when a concrete setup is present and you have explicit entry, sizing, and stop-loss values.
 Runtime decides whether this becomes a paper trade or a live order based on configuration.
-Keep arguments explicit and exchange-agnostic.`,
+Keep arguments explicit and exchange-agnostic.
+
+Direction semantics in LIVE spot mode:
+- "long"  → BUY base asset using available quote asset (USDT). Guard checks available_quote_asset >= notional.
+- "short" → SELL base asset from existing account inventory (e.g. pre-existing PAXG held in account, not necessarily opened by this bot). Guard checks available_base_asset >= quantity.
+
+When get_account_balance returns available_base_asset > 0 (and can_sell_inventory=true), a "short" trade can be opened using that inventory. This is not a futures short — it is a spot SELL from held inventory.`,
       parameters: {
         type: "object",
         properties: {

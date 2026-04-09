@@ -483,10 +483,14 @@ STEPS:
 1. Call get_session_info to confirm we are in an active trading window.
 2. Call check_cooldown to confirm no cooldown is blocking new entries.
 3. Call get_market_data — it returns price, bid/ask, candles, and indicators (EMA20/50/200, RSI14, ATR14, Range, volume spike).
-4. Call get_account_balance to get available USDT balance.
+4. Call get_account_balance to get available balances:
+   - available_quote_asset (USDT) → use for BUY setups (direction="long")
+   - available_base_asset (${config.instrument.baseAsset}) + can_sell_inventory → use for SELL setups (direction="short")
+   - If can_sell_inventory=true, existing ${config.instrument.baseAsset} inventory in the account is eligible for SELL even if not opened by this bot.
 5. Assess whether a valid setup is present based on indicators and available data.
 6. If a valid setup exists AND all guards pass:
    - Call open_trade with: symbol, direction ("long"/"short"), entry_price, quantity, stop_loss (required), take_profit (optional).
+   - For "long": size using available_quote_asset. For "short": size using available_base_asset (inventory SELL).
    - Only enter if risk_reward >= ${config.signal.minRiskReward}.
 7. Output ONLY plain text in this exact format. No markdown, no bold, no headers:
 

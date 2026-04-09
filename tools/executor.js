@@ -555,7 +555,11 @@ async function liveOpenTrade({ tradeId, symbol, direction, entryPrice, quantity,
   });
   recordTradeOpened();
 
-  log("trade", `LIVE ${direction} opened: ${symbol} qty=${executedQty} fill=${fillPrice} orderId=${orderResult.orderId}`);
+  if (direction === "short") {
+    log("trade", `LIVE SELL from inventory: ${symbol} qty=${executedQty} fill=${fillPrice} [source: available ${config.instrument.baseAsset} account balance] orderId=${orderResult.orderId}`);
+  } else {
+    log("trade", `LIVE BUY opened: ${symbol} qty=${executedQty} fill=${fillPrice} [source: available ${config.instrument.quoteAsset}] orderId=${orderResult.orderId}`);
+  }
 
   return {
     success: true,
@@ -571,6 +575,7 @@ async function liveOpenTrade({ tradeId, symbol, direction, entryPrice, quantity,
     feeUsd,
     orderId: orderResult.orderId,
     orderStatus: orderResult.status,
+    ...(direction === "short" ? { inventorySell: true, inventorySource: `${config.instrument.baseAsset} account balance` } : {}),
   };
 }
 
@@ -710,10 +715,20 @@ async function validateLiveOpenGuard({ symbol, direction, quantity, entryPrice }
   } catch (e) {
     return { ok: false, reason: `fresh account data fetch failed: ${e.message}` };
   }
-  const quoteBal = account.balances?.find((b) => b.asset === config.instrument.quoteAsset);
-  const quoteAvailable = Number(quoteBal?.free ?? 0);
-  if (!Number.isFinite(quoteAvailable) || quoteAvailable < notional) {
-    return { ok: false, reason: `available ${config.instrument.quoteAsset} ${quoteAvailable} < required notional ${notional}` };
+  if (direction === "long") {
+    // BUY: requires available quote asset (USDT)
+    const quoteBal = account.balances?.find((b) => (b.a ?? b.asset) === config.instrument.quoteAsset);
+    const quoteAvailable = Number(quoteBal?.f ?? quoteBal?.free ?? 0);
+    if (!Number.isFinite(quoteAvailable) || quoteAvailable < notional) {
+      return { ok: false, reason: `available ${config.instrument.quoteAsset} ${quoteAvailable} < required notional ${notional} for BUY` };
+    }
+  } else {
+    // SELL (direction="short"): uses existing base asset inventory — check available base asset
+    const baseBal = account.balances?.find((b) => (b.a ?? b.asset) === config.instrument.baseAsset);
+    const baseAvailable = Number(baseBal?.f ?? baseBal?.free ?? 0);
+    if (!Number.isFinite(baseAvailable) || baseAvailable < qty) {
+      return { ok: false, reason: `available ${config.instrument.baseAsset} ${baseAvailable} < required quantity ${qty} for inventory SELL` };
+    }
   }
   return { ok: true, reason: null };
 }
@@ -1151,6 +1166,10 @@ function buildLiveAccountResult(account) {
     },
     canTrade: account.canTrade ?? true,
     balance_source: "LIVE",
+    can_sell_inventory: baseAvailable >= config.instrument.minQuantity,
+    note: baseAvailable >= config.instrument.minQuantity
+      ? `${baseAsset} inventory available for SELL: ${baseAvailable} ${baseAsset} (live sell eligible)`
+      : undefined,
   };
 }
 

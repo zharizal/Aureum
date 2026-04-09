@@ -160,6 +160,12 @@ export async function generateBriefing() {
       `Balance source: ${escapeHtml(balSrc)}`,
     ].join(" | ");
 
+    // In LIVE mode: flag PAXG inventory as sell-eligible when above minQuantity
+    const minQty = config.instrument.minQuantity ?? 0;
+    const inventoryLine = !config.paper.enabled && availBase != null && availBase >= minQty
+      ? `<b>${escapeHtml(baseAsset)} inventory available for SELL:</b> ${Number(availBase).toFixed(4)} ${escapeHtml(baseAsset)} — live sell eligible`
+      : null;
+
     const lines = [
       `☀️ <b>${escapeHtml(config.instrument.symbol)} Briefing</b>`,
       `${escapeHtml(formatDateTime(now.toISOString()))}`,
@@ -170,6 +176,7 @@ export async function generateBriefing() {
       "",
       `<b>Account Balance</b>`,
       balanceLine,
+      ...(inventoryLine ? [inventoryLine] : []),
       "",
       `<b>Status</b>`,
       `Mode: <b>${escapeHtml(config.paper.enabled ? "PAPER" : "LIVE")}</b> | Quote asset: <b>${escapeHtml(config.instrument.quoteAsset)}</b> | Fee rate: <b>${escapeHtml(config.paper.feeRatePct)}%</b>`,
