@@ -72,9 +72,12 @@ function formatAnalystOutput(raw, { symbol, timeframe, paperMode }) {
     if (parts[1]) ema50  = parts[1].trim();
     if (parts[2]) ema200 = parts[2].trim();
   }
-  ema20  = extract(/EMA20\s*:\s*([0-9.,]+)/i,  /\bema20[^\d]*([0-9.,]+)/i)  || ema20;
-  ema50  = extract(/EMA50\s*:\s*([0-9.,]+)/i,  /\bema50[^\d]*([0-9.,]+)/i)  || ema50;
-  ema200 = extract(/EMA200\s*:\s*([0-9.,]+)/i, /\bema200[^\d]*([0-9.,]+)/i) || ema200;
+  // Only apply individual-line fallbacks when combined-line parse did not yield a value.
+  // The fuzzy /\bema20[^\d]*/ pattern would otherwise match "50" from "EMA20/50/200: ..."
+  // and silently clobber the correctly-parsed ema20.
+  if (ema20  === "-") ema20  = extract(/EMA20\s*:\s*([0-9.,]+)/i)  || "-";
+  if (ema50  === "-") ema50  = extract(/EMA50\s*:\s*([0-9.,]+)/i)  || "-";
+  if (ema200 === "-") ema200 = extract(/EMA200\s*:\s*([0-9.,]+)/i) || "-";
 
   const rsi = extract(/RSI14?\s*:\s*([0-9.,]+)/i, /\brsi[^\d]*([0-9.,]+)/i) || "-";
   const atr = extract(/ATR14?\s*:\s*([0-9.,]+)/i, /\batr[^\d]*([0-9.,]+)/i) || "-";
@@ -129,7 +132,7 @@ function formatAnalystOutput(raw, { symbol, timeframe, paperMode }) {
     `Mode: ${mode}`,
     ``,
     `Harga: ${harga}`,
-    `EMA20/50/200: ${ema20} / ${ema50} / ${ema200}`,
+    `EMA20/50/200: ${ema20 || "N/A"} / ${ema50 || "N/A"} / ${ema200 || "N/A"}`,
     `RSI14: ${rsi}`,
     `ATR14: ${atr}`,
     `Range: ${rangeLow} - ${rangeHigh}`,
