@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { log } from "./logger.js";
 import { getPerformanceHistory, getPerformanceSummary, listLessons } from "./lessons.js";
 import { checkCooldown, getStateSummary, getTodayStats, getTrackedTrades } from "./state.js";
+import { getAccountSnapshot } from "./tools/executor.js";
 
 function escapeHtml(value) {
   return String(value)
@@ -82,7 +83,7 @@ function buildCooldownLine() {
 
 function buildOpenTradesSection(openTrades) {
   if (openTrades.length === 0) {
-    return ["No open PAXG/USDT trades."];
+    return [`No open ${config.instrument.symbol} trades.`];
   }
 
   return openTrades.slice(0, 5).map((trade) => {
@@ -129,13 +130,32 @@ export async function generateBriefing() {
     const perfSummary = getPerformanceSummary();
     const perfHistory = getPerformanceHistory({ hours: 24, limit: 5 });
 
+    const accountSnap = getAccountSnapshot();
+    const quoteAsset = config.instrument.quoteAsset;
+    const baseAsset = config.instrument.baseAsset;
+    const availUsdt = accountSnap.balances?.[quoteAsset]?.available ?? accountSnap.available_balance_usd ?? 0;
+    const totalUsdt = accountSnap.balances?.[quoteAsset]?.total ?? accountSnap.balance_usd ?? 0;
+    const availBase = accountSnap.available_base_asset ?? accountSnap.balances?.[baseAsset]?.available ?? 0;
+    const totalBase = accountSnap.total_base_asset ?? accountSnap.balances?.[baseAsset]?.total ?? 0;
+    const balSrc = accountSnap.balance_source ?? "MANUAL_PAPER";
+    const balanceLine = [
+      `Available ${escapeHtml(quoteAsset)}: <b>$${Number(availUsdt).toFixed(2)}</b>`,
+      `Available ${escapeHtml(baseAsset)}: <b>${Number(availBase).toFixed(4)}</b>`,
+      `Total ${escapeHtml(baseAsset)} (incl. locked): <b>${Number(totalBase).toFixed(4)}</b>`,
+      `Total ${escapeHtml(quoteAsset)}: <b>$${Number(totalUsdt).toFixed(2)}</b>`,
+      `Balance source: ${escapeHtml(balSrc)}`,
+    ].join(" | ");
+
     const lines = [
-      `☀️ <b>PAXG/USDT Briefing</b>`,
+      `☀️ <b>${escapeHtml(config.instrument.symbol)} Briefing</b>`,
       `${escapeHtml(formatDateTime(now.toISOString()))}`,
       "────────────────",
       `<b>Venue Context</b>`,
       `Exchange: <b>${escapeHtml(config.instrument.exchange)}</b> | Symbol: <b>${escapeHtml(config.instrument.symbol)}</b> | Timeframe: <b>${escapeHtml(config.market.timeframe)}</b>`,
       escapeHtml(buildSessionLine()),
+      "",
+      `<b>Account Balance</b>`,
+      balanceLine,
       "",
       `<b>Status</b>`,
       `Mode: <b>${escapeHtml(config.paper.enabled ? "PAPER" : "LIVE")}</b> | Quote asset: <b>${escapeHtml(config.instrument.quoteAsset)}</b> | Fee rate: <b>${escapeHtml(config.paper.feeRatePct)}%</b>`,
@@ -166,9 +186,9 @@ export async function generateBriefing() {
 
     return lines.join("\n");
   } catch (error) {
-    log("briefing_error", `Failed to generate PAXG/USDT briefing: ${error.message}`);
+    log("briefing_error", `Failed to generate ${config.instrument.symbol} briefing: ${error.message}`);
     return [
-      "☀️ <b>PAXG/USDT Briefing</b>",
+      `☀️ <b>${escapeHtml(config.instrument.symbol)} Briefing</b>`,
       "Unable to build the full briefing from current local data.",
       `Reason: ${escapeHtml(error.message)}`,
     ].join("\n");

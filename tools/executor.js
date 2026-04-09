@@ -49,6 +49,10 @@ const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
 
+// Cache for real exchange balance when paper.balanceSource === "real_exchange"
+// Updated by getAccountBalance(); read synchronously by buildPaperAccountBalance()
+let _realBalanceCache = { quoteAvailable: null, baseAvailable: null, lastFetchedMs: 0 };
+
 function roundTo(value, decimals = 8) {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -947,7 +951,18 @@ function buildPaperAccountBalance() {
   const pnlToday = today?.pnlUsd ?? 0;
   const quoteAsset = config.instrument.quoteAsset;
   const baseAsset = config.instrument.baseAsset;
-  const totalQuoteBalance = roundTo(config.paper.initialBalance + pnlToday, 2);
+
+  // Determine equity basis: real exchange free balance (cached) or manual paper balance
+  let totalQuoteBalance;
+  let balanceSource;
+  if (config.paper.balanceSource === "real_exchange" && _realBalanceCache.quoteAvailable !== null) {
+    totalQuoteBalance = roundTo(_realBalanceCache.quoteAvailable, 2);
+    balanceSource = "REAL_EXCHANGE";
+  } else {
+    totalQuoteBalance = roundTo(config.paper.initialBalance + pnlToday, 2);
+    balanceSource = "MANUAL_PAPER";
+  }
+
   const reservedQuote = roundTo(
     openTrades.reduce((sum, trade) => sum + (trade.reservedQuoteUsd ?? ((trade.entryPrice ?? 0) * (trade.quantity ?? 0))), 0),
     2,
@@ -958,11 +973,17 @@ function buildPaperAccountBalance() {
       .reduce((sum, trade) => sum + (trade.quantity ?? 0), 0),
     config.instrument.quantityPrecision,
   );
+  // Use real exchange base balance from cache (real_exchange mode) or zero for pure paper
+  const baseAvailableFree = (config.paper.balanceSource === "real_exchange" && _realBalanceCache.baseAvailable !== null)
+    ? _realBalanceCache.baseAvailable
+    : 0;
+  const baseTotal = roundTo(baseAvailableFree + baseLocked, config.instrument.quantityPrecision);
   const availableQuote = roundTo(Math.max(0, totalQuoteBalance - reservedQuote), 2);
 
   return {
     success: true,
     paper: true,
+    balance_source: balanceSource,
     exchange: config.instrument.exchange,
     symbol: config.instrument.symbol,
     canOpenTrade: availableQuote >= config.instrument.minNotional,
@@ -975,11 +996,15 @@ function buildPaperAccountBalance() {
       },
       [baseAsset]: {
         asset: baseAsset,
-        total: baseLocked,
-        available: 0,
+        total: baseTotal,
+        available: baseAvailableFree,
         locked: baseLocked,
       },
     },
+    available_base_asset: baseAvailableFree,
+    total_base_asset: baseTotal,
+    available_quote_asset: availableQuote,
+    total_quote_asset: totalQuoteBalance,
     quote_asset: quoteAsset,
     base_asset: baseAsset,
     balance_usd: totalQuoteBalance,
@@ -994,7 +1019,9 @@ function buildPaperAccountBalance() {
       maxPositionNotional: config.risk.maxPositionNotional,
       canOpenTrade: availableQuote >= config.instrument.minNotional,
     },
-    note: "Paper account balances are derived from configured paper balance and tracked open trades.",
+    note: balanceSource === "REAL_EXCHANGE"
+      ? "Paper mode using real exchange free balance for sizing. Execution is simulated."
+      : "Paper account balances are derived from configured paper balance and tracked open trades.",
   };
 }
 
@@ -1035,6 +1062,8 @@ async function fetchLiveAccountBalance() {
 
   // Prefer per-asset endpoint: GET /open/v1/account/spot/asset?asset=X
   // Returns { asset, free, locked } under data — more targeted and reliable.
+  // Fetch each individually so a missing base asset doesn't discard good quote data.
+  let perAssetBalances = [];
   try {
     const [quoteJson, baseJson] = await Promise.all([
       apiFetch(signedUrl("/open/v1/account/spot/asset", `asset=${quoteAsset}`)),
@@ -1042,10 +1071,18 @@ async function fetchLiveAccountBalance() {
     ]);
     const quoteData = quoteJson.data ?? quoteJson;
     const baseData = baseJson.data ?? baseJson;
-    if (quoteData?.asset && baseData?.asset) {
-      return { balances: [quoteData, baseData], canTrade: true };
+    log("balance_debug",
+      `[per-asset endpoint] ${quoteAsset}: asset=${quoteData?.asset ?? "MISSING"} free=${quoteData?.free ?? quoteData?.f ?? "?"} ` +
+      `| ${baseAsset}: asset=${baseData?.asset ?? "MISSING"} free=${baseData?.free ?? baseData?.f ?? "?"}`
+    );
+    if (quoteData?.asset) perAssetBalances.push(quoteData);
+    if (baseData?.asset) perAssetBalances.push(baseData);
+    // Return early only if we got at least the quote asset
+    if (quoteData?.asset) {
+      return { balances: perAssetBalances, canTrade: true };
     }
-  } catch (_) {
+  } catch (e) {
+    log("balance_debug", `[per-asset endpoint] FAILED: ${e.message} — falling through to full account`);
     // fall through to full account endpoint
   }
 
@@ -1054,6 +1091,15 @@ async function fetchLiveAccountBalance() {
   const data = json.data ?? json;
   // Normalise data.accountAssets → balances so buildLiveAccountResult can find assets.
   const accountAssets = data.accountAssets ?? data.balances ?? (Array.isArray(data) ? data : []);
+  // Debug: log all raw asset keys returned by exchange
+  const rawAssetKeys = accountAssets.map((b) => b.a ?? b.asset ?? "?").filter(Boolean);
+  log("balance_debug",
+    `[full account endpoint] total assets returned: ${accountAssets.length} | keys: [${rawAssetKeys.join(", ")}]`
+  );
+  log("balance_debug",
+    `[full account endpoint] ${quoteAsset} raw: ${JSON.stringify(accountAssets.find((b) => (b.a ?? b.asset) === quoteAsset) ?? null)} ` +
+    `| ${baseAsset} raw: ${JSON.stringify(accountAssets.find((b) => (b.a ?? b.asset) === baseAsset) ?? null)}`
+  );
   return { ...data, balances: accountAssets };
 }
 
@@ -1083,6 +1129,10 @@ function buildLiveAccountResult(account) {
       [quoteAsset]: { asset: quoteAsset, total: quoteTotal, available: quoteAvailable, locked: quoteLocked },
       [baseAsset]: { asset: baseAsset, total: baseTotal, available: baseAvailable, locked: baseLocked },
     },
+    available_base_asset: baseAvailable,
+    total_base_asset: baseTotal,
+    available_quote_asset: quoteAvailable,
+    total_quote_asset: quoteTotal,
     quote_asset: quoteAsset,
     base_asset: baseAsset,
     balance_usd: quoteTotal,
@@ -1101,6 +1151,18 @@ function buildLiveAccountResult(account) {
 
 // ─── getAccountBalance: custom URL → Tokocrypto signed → paper fallback ──────
 
+function _logBalanceDebug(result) {
+  const q = result.quote_asset ?? config.instrument.quoteAsset;
+  const b = result.base_asset ?? config.instrument.baseAsset;
+  const qBal = result.balances?.[q] ?? {};
+  const bBal = result.balances?.[b] ?? {};
+  log("balance_debug",
+    `[get_account_balance] source=${result.balance_source ?? (result.live ? "LIVE" : "PAPER")} ` +
+    `| ${q} free=${qBal.available ?? result.available_quote_asset ?? "?"} total=${qBal.total ?? result.total_quote_asset ?? "?"} ` +
+    `| ${b} free=${bBal.available ?? result.available_base_asset ?? "?"} total=${bBal.total ?? result.total_base_asset ?? "?"}`
+  );
+}
+
 async function getAccountBalance() {
   // Path 1: Legacy custom URL override (TOKOCRYPTO_ACCOUNT_URL)
   const customUrl = process.env.TOKOCRYPTO_ACCOUNT_URL;
@@ -1110,7 +1172,7 @@ async function getAccountBalance() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const payload = await response.json();
-      return {
+      const r = {
         success: true,
         live: true,
         exchange: config.instrument.exchange,
@@ -1120,24 +1182,74 @@ async function getAccountBalance() {
         base_asset: config.instrument.baseAsset,
         note: "Live account balance fetched from custom endpoint.",
       };
+      _logBalanceDebug(r);
+      return r;
     } catch (error) {
-      return {
+      const r = {
         ...buildPaperAccountBalance(),
         liveFallback: true,
         note: `Paper fallback — custom account endpoint failed: ${error.message}`,
       };
+      _logBalanceDebug(r);
+      return r;
     }
   }
 
-  // Path 2: Tokocrypto signed REST API
-  // Non-paper mode: try if API key/secret are set
-  // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set AND key/secret exist
   const apiKey = process.env.TOKOCRYPTO_API_KEY;
   const apiSecret = process.env.TOKOCRYPTO_API_SECRET;
+
+  // Path 2a: Paper mode + real_exchange balance source
+  // Fetch live balance to update sizing cache; execution remains fully simulated.
+  if (config.paper.enabled && config.paper.balanceSource === "real_exchange") {
+    if (apiKey && apiSecret) {
+      try {
+        const account = await fetchLiveAccountBalance();
+        // Log all raw asset keys from exchange before searching
+        const rawBalances = Array.isArray(account.balances) ? account.balances : Object.values(account.balances ?? {});
+        const rawKeys = rawBalances.map((b) => b.a ?? b.asset ?? "?").filter(Boolean);
+        log("balance_debug",
+          `[real_exchange fetch] raw balance keys from exchange (${rawKeys.length}): [${rawKeys.join(", ")}]`
+        );
+        log("balance_debug",
+          `[real_exchange fetch] ${config.instrument.quoteAsset} raw=${JSON.stringify(rawBalances.find((b) => (b.a ?? b.asset) === config.instrument.quoteAsset) ?? null)} ` +
+          `| ${config.instrument.baseAsset} raw=${JSON.stringify(rawBalances.find((b) => (b.a ?? b.asset) === config.instrument.baseAsset) ?? null)}`
+        );
+        const quoteBal = account.balances?.find((b) => (b.a ?? b.asset) === config.instrument.quoteAsset);
+        if (quoteBal) {
+          _realBalanceCache.quoteAvailable = roundTo(Number(quoteBal?.f ?? quoteBal?.free ?? 0), 2);
+          _realBalanceCache.lastFetchedMs = Date.now();
+          log("balance_debug", `[real_exchange fetch] ${config.instrument.quoteAsset} free=${quoteBal?.f ?? quoteBal?.free ?? "?"} locked=${quoteBal?.l ?? quoteBal?.locked ?? "?"}`);
+        } else {
+          log("balance_debug", `[real_exchange fetch] ${config.instrument.quoteAsset} NOT found in balances array`);
+        }
+        const baseBal = account.balances?.find((b) => (b.a ?? b.asset) === config.instrument.baseAsset);
+        if (baseBal) {
+          _realBalanceCache.baseAvailable = roundTo(Number(baseBal?.f ?? baseBal?.free ?? 0), config.instrument.quantityPrecision);
+          log("balance_debug", `[real_exchange fetch] ${config.instrument.baseAsset} free=${baseBal?.f ?? baseBal?.free ?? "?"} locked=${baseBal?.l ?? baseBal?.locked ?? "?"}`);
+        } else {
+          log("balance_debug", `[real_exchange fetch] ${config.instrument.baseAsset} NOT found in balances array — may be zero balance or different asset key on exchange`);
+        }
+      } catch (err) {
+        log("account", `Real balance fetch failed (paper sizing), using fallback: ${err.message}`);
+        log("balance_debug", `[real_exchange fetch] FAILED: ${err.message} — cache: quote=${_realBalanceCache.quoteAvailable} base=${_realBalanceCache.baseAvailable}`);
+      }
+    } else {
+      log("balance_debug", `[real_exchange fetch] SKIPPED — no API keys configured. Cache: quote=${_realBalanceCache.quoteAvailable} base=${_realBalanceCache.baseAvailable}`);
+    }
+    // Always return paper result (execution is simulated regardless of fetch success)
+    const r = buildPaperAccountBalance();
+    _logBalanceDebug(r);
+    return r;
+  }
+
+  // Path 2b: Tokocrypto signed REST API (live mode only)
+  // Paper mode: only try if TOKOCRYPTO_API_URL is explicitly set AND key/secret exist
   if (apiKey && apiSecret && (!config.paper.enabled || process.env.TOKOCRYPTO_API_URL)) {
     try {
       const account = await fetchLiveAccountBalance();
-      return buildLiveAccountResult(account);
+      const r = buildLiveAccountResult(account);
+      _logBalanceDebug(r);
+      return r;
     } catch (error) {
       log("account", `Live account balance failed: ${error.message}`);
       // In live mode, do NOT silently serve paper balances — surface the error.
@@ -1148,15 +1260,28 @@ async function getAccountBalance() {
           exchange: config.instrument.exchange,
         };
       }
-      return {
+      const r = {
         ...buildPaperAccountBalance(),
         liveFallback: true,
         note: `Paper fallback — live account failed: ${error.message}`,
       };
+      _logBalanceDebug(r);
+      return r;
     }
   }
 
   // Path 3: Paper-only fallback
+  const result = buildPaperAccountBalance();
+  _logBalanceDebug(result);
+  return result;
+}
+
+/**
+ * Synchronous snapshot of the current account balance (paper mode).
+ * Safe to call from briefing/summary contexts that cannot await getAccountBalance().
+ * Returns the same shape as buildPaperAccountBalance().
+ */
+export function getAccountSnapshot() {
   return buildPaperAccountBalance();
 }
 
@@ -1543,7 +1668,10 @@ async function runSafetyChecks(name, args) {
 
       const today = getTodayStats();
       if (today && config.risk.maxDailyLossPct && config.paper.enabled) {
-        const paperBalance = config.paper.initialBalance;
+        const equityBasis = (config.paper.balanceSource === "real_exchange" && _realBalanceCache.quoteAvailable !== null)
+          ? _realBalanceCache.quoteAvailable
+          : config.paper.initialBalance;
+        const paperBalance = equityBasis;
         const dailyLossPct = paperBalance > 0
           ? Math.abs(Math.min(0, today.pnlUsd) / paperBalance) * 100
           : 0;

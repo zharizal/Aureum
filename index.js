@@ -686,11 +686,17 @@ if (isMainModule && isTTY) {
     const windows = config.session.allowedWindows ?? [];
     const activeSessions = windows.filter((w) => hourUtc >= w.start && hourUtc < w.end).map((w) => w.name);
     const paperBalance = config.paper.initialBalance + (today?.pnlUsd ?? 0);
+    const balSrc = config.paper.balanceSource === "real_exchange" ? "REAL_EXCHANGE" : "MANUAL_PAPER";
 
-    console.log(`Mode:     ${config.paper.enabled ? "PAPER" : "LIVE"}`);
-    console.log(`Exchange: ${config.instrument.exchange}`);
+    console.log(`Execution: ${config.paper.enabled ? "PAPER" : "LIVE"}`);
+    console.log(`Exchange:  ${config.instrument.exchange}`);
     if (config.paper.enabled) {
-      console.log(`Balance:  $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`);
+      console.log(`Bal.Src:   ${balSrc}`);
+      if (balSrc === "REAL_EXCHANGE") {
+        console.log(`Balance:   (fetched from exchange on first cycle) ${config.instrument.quoteAsset}`);
+      } else {
+        console.log(`Balance:   $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`);
+      }
     }
     console.log(`Session:  ${activeSessions.length ? activeSessions.join(", ") : "Outside configured windows"} (UTC ${hourUtc}:00)`);
     console.log(`Trades:   ${openTrades.length}/${config.risk.maxOpenTrades} open`);
@@ -1025,7 +1031,17 @@ STARTUP CHECK
 2. Call get_open_trades to review any existing positions.
 3. Call get_session_info to determine the current trading window.
 4. Call check_cooldown to see if a cooldown is active.
-5. Report current bot status and whether conditions allow a new trade.
+5. Report status in this exact plain-text format (no markdown):
+
+Bot: RUNNING | Mode: ${config.paper.enabled ? "PAPER" : "LIVE"} | Exchange: ${config.instrument.exchange}
+Available ${config.instrument.quoteAsset}: <available_quote_asset from get_account_balance>
+Available ${config.instrument.baseAsset}: <available_base_asset from get_account_balance>
+Total ${config.instrument.baseAsset}: <total_base_asset from get_account_balance>
+Balance source: <balance_source from get_account_balance>
+Open trades: <count>/<maxOpenTrades>
+Session: <active window name or INACTIVE>
+Cooldown: <ACTIVE reason | CLEAR>
+Can open trade: <YES | NO — reason>
       `, config.llm.maxSteps, [], "GENERAL");
     } catch (e) {
       log("startup_error", e.message);
