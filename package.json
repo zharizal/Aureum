@@ -2,7 +2,7 @@
   "name": "aureum",
   "version": "1.0.0",
   "type": "module",
-  "description": "Autonomous XAUT/USDT spot trading agent for Tokocrypto",
+  "description": "Autonomous PAXG/USDT spot trading agent for Tokocrypto",
   "main": "index.js",
   "bin": {
     "aureum": "cli.js"

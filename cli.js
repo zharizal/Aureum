@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * aureum — XAUT/USDT Tokocrypto operator CLI
+ * aureum — PAXG/USDT Tokocrypto operator CLI
  * Direct operator/runtime access with JSON output.
  */
 
@@ -28,7 +28,7 @@ function die(msg, extra = {}) {
   process.exit(1);
 }
 
-const SKILL_MD = `# aureum — XAUT/USDT Tokocrypto operator CLI
+const SKILL_MD = `# aureum — PAXG/USDT Tokocrypto operator CLI
 
 Data dir: ~/.aureum/
 
@@ -62,7 +62,7 @@ Output: { mode, max_open_trades, risk_pct_per_trade, max_daily_loss_pct, max_dra
 \`\`\`
 
 ### aureum briefing
-Returns the current XAUT/USDT operator briefing.
+Returns the current PAXG/USDT operator briefing.
 \`\`\`
 Output: { briefing }
 \`\`\`
@@ -238,7 +238,7 @@ switch (subcommand) {
 
   case "start": {
     const { startCronJobs } = await import("./index.js");
-    process.stderr.write("[aureum] Starting XAUT/USDT Tokocrypto trading agent...\n");
+    process.stderr.write("[aureum] Starting PAXG/USDT Tokocrypto trading agent...\n");
     startCronJobs();
     break;
   }

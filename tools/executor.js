@@ -1,7 +1,7 @@
 /**
  * tools/executor.js
  *
- * Central tool dispatch layer for the XAUT/USDT spot-trading agent.
+ * Central tool dispatch layer for the PAXG/USDT spot-trading agent.
  */
 
 import {
@@ -125,7 +125,7 @@ function buildPaperMarketData({ symbol = config.instrument.symbol, timeframe = c
 
 // ─── Live market-data helpers (Tokocrypto REST API) ──────────────────────────
 
-// Tokocrypto symbol format: XAUT_USDT (slash/dash/space → underscore, uppercase)
+// Tokocrypto symbol format: PAXG_USDT (slash/dash/space → underscore, uppercase)
 function toApiSymbol(symbol) {
   return symbol.replace(/[\/\-\s]/g, "_").replace(/_+/g, "_").toUpperCase();
 }

@@ -17,8 +17,8 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 export const config = {
   instrument: {
     exchange: u.exchange ?? "Tokocrypto",
-    symbol: u.symbol ?? "XAUT/USDT",
-    baseAsset: u.baseAsset ?? "XAUT",
+    symbol: u.symbol ?? "PAXG/USDT",
+    baseAsset: u.baseAsset ?? "PAXG",
     quoteAsset: u.quoteAsset ?? "USDT",
     pricePrecision: u.pricePrecision ?? 2,
     quantityPrecision: u.quantityPrecision ?? 4,

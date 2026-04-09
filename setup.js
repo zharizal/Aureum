@@ -1,7 +1,7 @@
 /**
  * Interactive setup wizard.
  * Guides the user through .env + user-config.json creation
- * for the current XAUT/USDT Tokocrypto runtime.
+ * for the current PAXG/USDT Tokocrypto runtime.
  * Run: npm run setup
  */
 
@@ -143,7 +143,7 @@ const alreadySet = (val) => (val ? "*** (already set — Enter to keep)" : "");
 console.log(`
 ╔═══════════════════════════════════════════════╗
 ║          Aureum — Setup Wizard               ║
-║      XAUT/USDT Tokocrypto Runtime            ║
+║      PAXG/USDT Tokocrypto Runtime            ║
 ╚═══════════════════════════════════════════════╝
 
 This wizard creates your .env and user-config.json.
@@ -185,8 +185,8 @@ console.log("-- Runtime ----------------------------------------------------");
 
 const dryRun = await askBool("Paper / dry-run mode?", e("dryRun", true));
 const exchange = await ask("Exchange venue", e("exchange", "Tokocrypto"));
-const symbol = await ask("Trading symbol", e("symbol", "XAUT/USDT"));
-const baseAsset = await ask("Base asset", e("baseAsset", "XAUT"));
+const symbol = await ask("Trading symbol", e("symbol", "PAXG/USDT"));
+const baseAsset = await ask("Base asset", e("baseAsset", "PAXG"));
 const quoteAsset = await ask("Quote asset", e("quoteAsset", "USDT"));
 const timeframe = await ask("Analysis timeframe", p("timeframe", "15m"));
 const paperBalance = await askNum(`Paper balance (${quoteAsset})`, e("paperBalance", 10000), { min: 100 });

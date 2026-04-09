@@ -13,7 +13,7 @@ Keep arguments explicit and exchange-agnostic.`,
         properties: {
           symbol: {
             type: "string",
-            description: "Instrument symbol. Defaults to the configured instrument when omitted, typically XAUT/USDT."
+            description: "Instrument symbol. Defaults to the configured instrument when omitted, typically PAXG/USDT."
           },
           direction: {
             type: "string",

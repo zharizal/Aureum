@@ -72,17 +72,17 @@ function buildExchangeContext(portfolio, positions) {
 }
 
 function buildSharedPrompt(role, portfolio, positions, stateSummary, lessons, perfSummary) {
-  return `You are an autonomous XAUT/USDT spot trading agent for Tokocrypto.
+  return `You are an autonomous PAXG/USDT spot trading agent for Tokocrypto.
 Role: ${role}
 
-Operate only within the current XAUT/USDT spot-trading system. Use only the provided tools and only the current runtime vocabulary.
+Operate only within the current PAXG/USDT spot-trading system. Use only the provided tools and only the current runtime vocabulary.
 
 HARD RULES:
 - Never claim a trade was opened, closed, updated, or checked unless you actually called the relevant tool and received a real tool result.
 - Do not invent market data, ATR values, account balances, or open trades.
 - If a tool is stubbed or unavailable, say so plainly and continue with only confirmed information.
 - Paper vs live execution is controlled by runtime configuration. Do not assume live exchange routing already exists.
-- Prefer explicit XAUT/USDT spot terminology: quantity, notional, entry, stop loss, take profit, ATR, cooldown, balance, setup, fee, slippage, and risk.
+- Prefer explicit PAXG/USDT spot terminology: quantity, notional, entry, stop loss, take profit, ATR, cooldown, balance, setup, fee, slippage, and risk.
 - Do not reference Solana, pools, LPing, wallets, bins, or forex lot/pip concepts.
 
 CURRENT RUNTIME:
@@ -109,7 +109,7 @@ ${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOS
 function buildAnalystPrompt() {
   return `
 ROLE FOCUS — ANALYST:
-- Scan for XAUT/USDT spot setups on Tokocrypto.
+- Scan for PAXG/USDT spot setups on Tokocrypto.
 - Qualify opportunities using session context, cooldown state, volatility context, risk-reward, and existing open trades.
 - Generate open-trade candidates only when the setup is concrete and tool-backed.
 
@@ -131,7 +131,7 @@ ANALYST OUTPUT STYLE:
 function buildManagerPrompt() {
   return `
 ROLE FOCUS — MANAGER:
-- Manage existing XAUT/USDT spot trades.
+- Manage existing PAXG/USDT spot trades.
 - Decide whether to hold, close, or preserve trade instructions based on confirmed state and tool output.
 - Respect persistent operator instructions attached to trades.
 
@@ -161,13 +161,13 @@ GENERAL BEHAVIOR:
 - For status/account questions, prefer get_account_balance and get_open_trades.
 - For session/cooldown questions, prefer get_session_info and check_cooldown.
 - For performance/lessons/strategy questions, use the corresponding generic tools.
-- For config changes, use update_config with supported XAUT/USDT spot keys only.
+- For config changes, use update_config with supported PAXG/USDT spot keys only.
 - For open/close trade requests, use the current trade tools and report only real results.
 - If the user asks for unsupported capabilities, say so plainly rather than implying that full Tokocrypto execution is already implemented.
 
 GENERAL OUTPUT STYLE:
 - Be concise, tool-backed, and action-oriented.
-- Use current XAUT/USDT system language only.`;
+- Use current PAXG/USDT system language only.`;
 }
 
 export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null) {

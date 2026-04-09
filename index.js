@@ -121,7 +121,7 @@ function formatAnalystOutput(raw, { symbol, timeframe, paperMode }) {
 
   const aksi = extract(/^Aksi\s*:\s*(.+)/im) || "-";
 
-  const sym = symbol || "XAUT/USDT";
+  const sym = symbol || "PAXG/USDT";
   const tf  = timeframe || "15m";
 
   return [
@@ -145,7 +145,7 @@ function formatAnalystOutput(raw, { symbol, timeframe, paperMode }) {
   ].join("\n");
 }
 
-log("startup", "XAUT/USDT Tokocrypto trading agent starting...");
+log("startup", "PAXG/USDT Tokocrypto trading agent starting...");
 log("startup", `Mode: ${config.paper.enabled ? "PAPER" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || config.llm.generalModel}`);
 
@@ -467,7 +467,7 @@ export async function runAnalysisCycle({ silent = false } = {}) {
       : "  None";
 
     const { content } = await agentLoop(`
-ANALYSIS CYCLE — Scan for XAUT/USDT setup opportunities on Tokocrypto
+ANALYSIS CYCLE — Scan for PAXG/USDT setup opportunities on Tokocrypto
 
 ${strategyBlock}
 Exchange: ${config.instrument.exchange}
@@ -673,7 +673,7 @@ if (isMainModule && isTTY) {
 
   console.log(`
 ╔═══════════════════════════════════════════╗
-║   XAUT/USDT Tokocrypto Agent — Ready     ║
+║   PAXG/USDT Tokocrypto Agent — Ready     ║
 ╚═══════════════════════════════════════════╝
 `);
 

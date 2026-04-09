@@ -82,7 +82,7 @@ function buildCooldownLine() {
 
 function buildOpenTradesSection(openTrades) {
   if (openTrades.length === 0) {
-    return ["No open XAUT/USDT trades."];
+    return ["No open PAXG/USDT trades."];
   }
 
   return openTrades.slice(0, 5).map((trade) => {
@@ -130,7 +130,7 @@ export async function generateBriefing() {
     const perfHistory = getPerformanceHistory({ hours: 24, limit: 5 });
 
     const lines = [
-      `☀️ <b>XAUT/USDT Briefing</b>`,
+      `☀️ <b>PAXG/USDT Briefing</b>`,
       `${escapeHtml(formatDateTime(now.toISOString()))}`,
       "────────────────",
       `<b>Venue Context</b>`,
@@ -166,9 +166,9 @@ export async function generateBriefing() {
 
     return lines.join("\n");
   } catch (error) {
-    log("briefing_error", `Failed to generate XAUT/USDT briefing: ${error.message}`);
+    log("briefing_error", `Failed to generate PAXG/USDT briefing: ${error.message}`);
     return [
-      "☀️ <b>XAUT/USDT Briefing</b>",
+      "☀️ <b>PAXG/USDT Briefing</b>",
       "Unable to build the full briefing from current local data.",
       `Reason: ${escapeHtml(error.message)}`,
     ].join("\n");
