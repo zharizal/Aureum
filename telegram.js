@@ -100,6 +100,7 @@ async function poll(onMessage) {
         if (!msg?.text) continue;
 
         const incomingChatId = String(msg.chat.id);
+        log("telegram_debug", `Poll received: "${msg.text.slice(0, 80)}" (chat: ${incomingChatId})`);
 
         // Auto-register first sender as the owner
         if (!chatId) {
@@ -124,10 +125,13 @@ async function poll(onMessage) {
 }
 
 export function startPolling(onMessage) {
-  if (!TOKEN) return;
+  if (!TOKEN) {
+    log("telegram", "startPolling skipped — TELEGRAM_BOT_TOKEN not set");
+    return;
+  }
   _polling = true;
   poll(onMessage); // fire-and-forget
-  log("telegram", "Bot polling started");
+  log("telegram", "Bot polling listener started — waiting for updates");
 }
 
 export function stopPolling() {

@@ -733,6 +733,8 @@ if (isMainModule && isTTY) {
   }
 
   async function telegramHandler(text) {
+    log("telegram", `[incoming] "${text.slice(0, 80)}"`);
+
     if (_managementBusy || _analysisBusy || busy) {
       if (_telegramQueue.length < 5) {
         _telegramQueue.push(text);
@@ -743,15 +745,70 @@ if (isMainModule && isTTY) {
       return;
     }
 
+    if (text === "/help") {
+      log("telegram", "[CMD] Parsed: /help");
+      try {
+        await sendMessage(
+          "Available commands:\n" +
+          "/status — account & session info\n" +
+          "/trades — list open trades\n" +
+          "/briefing — morning briefing\n" +
+          "/close <n> — close trade #n\n" +
+          "/set <n> <note> — add trade instruction\n" +
+          "Any other text — chat with the agent"
+        );
+        log("telegram", "[CMD] Reply sent: /help");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /help — ${e.message}`);
+      }
+      return;
+    }
+
+    if (text === "/status") {
+      log("telegram", "[CMD] Parsed: /status");
+      try {
+        const openTrades = getTrackedTrades(true);
+        const today = getTodayStats();
+        const cooldown = checkCooldown(config.cooldown);
+        const hourUtc = new Date().getUTCHours();
+        const windows = config.session.allowedWindows ?? [];
+        const activeSessions = windows.filter((w) => hourUtc >= w.start && hourUtc < w.end).map((w) => w.name);
+        const paperBalance = config.paper.initialBalance + (today?.pnlUsd ?? 0);
+        const balSrc = config.paper.balanceSource === "real_exchange" ? "REAL_EXCHANGE" : "MANUAL_PAPER";
+        const lines = [
+          `Mode: ${config.paper.enabled ? "PAPER" : "LIVE"} | Exchange: ${config.instrument.exchange}`,
+          config.paper.enabled
+            ? (balSrc === "REAL_EXCHANGE" ? `Balance: fetched from exchange` : `Balance: $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`)
+            : null,
+          `Session: ${activeSessions.length ? activeSessions.join(", ") : "Outside window"} (UTC ${hourUtc}:00)`,
+          `Trades: ${openTrades.length}/${config.risk.maxOpenTrades} open`,
+          cooldown.blocked ? `Cooldown: ${cooldown.reason}` : null,
+          today ? `Today P&L: $${(today.pnlUsd ?? 0).toFixed(2)} | ${today.wins ?? 0}W / ${today.losses ?? 0}L` : null,
+        ].filter(Boolean).join("\n");
+        await sendMessage(lines);
+        log("telegram", "[CMD] Reply sent: /status");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /status — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
     if (text === "/briefing") {
+      log("telegram", "[CMD] Parsed: /briefing");
       try {
         const briefing = await generateBriefing();
         await sendHTML(briefing);
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        log("telegram", "[CMD] Reply sent: /briefing");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /briefing — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
       return;
     }
 
     if (text === "/trades" || text === "/positions") {
+      log("telegram", `[CMD] Parsed: ${text.split(" ")[0]}`);
       try {
         const trades = getTrackedTrades(true);
         if (trades.length === 0) { await sendMessage("No open trades."); return; }
@@ -762,12 +819,17 @@ if (isMainModule && isTTY) {
           return `${i + 1}. ${t.symbol} ${t.direction.toUpperCase()} @ ${t.entryPrice} | Qty: ${t.quantity} | ${pnl}${trail} | ${age}`;
         });
         await sendMessage(`📊 Open Trades (${trades.length}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to add instruction`);
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        log("telegram", "[CMD] Reply sent: /trades");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /trades — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
       return;
     }
 
     const closeMatch = text.match(/^\/close\s+(\d+)$/i);
     if (closeMatch) {
+      log("telegram", `[CMD] Parsed: /close ${closeMatch[1]}`);
       try {
         const idx = parseInt(closeMatch[1]) - 1;
         const trades = getTrackedTrades(true);
@@ -779,12 +841,17 @@ if (isMainModule && isTTY) {
           config.llm.maxSteps, [], "MANAGER", config.llm.managementModel
         );
         await sendMessage(stripThink(content));
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        log("telegram", `[CMD] Reply sent: /close ${closeMatch[1]}`);
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /close — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
       return;
     }
 
     const setMatch = text.match(/^\/set\s+(\d+)\s+(.+)$/i);
     if (setMatch) {
+      log("telegram", `[CMD] Parsed: /set ${setMatch[1]}`);
       try {
         const idx = parseInt(setMatch[1]) - 1;
         const note = setMatch[2].trim();
@@ -794,16 +861,20 @@ if (isMainModule && isTTY) {
         const ok = setTradeInstruction(trade.tradeId, note);
         if (ok) {
           await sendMessage(`✅ Instruction set for ${trade.symbol} (${trade.tradeId}):\n"${note}"`);
+          log("telegram", `[CMD] Reply sent: /set ${setMatch[1]}`);
         } else {
           await sendMessage(`❌ Trade not found: ${trade.tradeId}`);
         }
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /set — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
       return;
     }
 
     busy = true;
     try {
-      log("telegram", `Incoming: ${text}`);
+      log("telegram", `[CMD] Fallback to agentLoop: "${text.slice(0, 60)}"`);
       const hasCloseIntent = /\bclose\b|\bexit\b|\bsell\b/i.test(text);
       const hasOpenIntent = !hasCloseIntent && /\bopen\b|\bbuy\b|\blong\b|\bshort\b|\btrade\b/i.test(text);
       const agentRole = hasCloseIntent ? "MANAGER" : hasOpenIntent ? "ANALYST" : "GENERAL";
@@ -811,7 +882,9 @@ if (isMainModule && isTTY) {
       const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, { requireTool: true });
       appendHistory(text, content);
       await sendMessage(stripThink(content));
+      log("telegram", "[CMD] agentLoop reply sent");
     } catch (e) {
+      log("telegram", `[CMD] agentLoop reply failed: ${e.message}`);
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     } finally {
       busy = false;
@@ -1029,6 +1102,177 @@ if (isMainModule && isTTY) {
   log("startup", "Non-TTY mode — starting cron cycles immediately.");
   startCronJobs();
   maybeRunMissedBriefing().catch(() => {});
+
+  // ─── Non-TTY Telegram command handler ────────────────────────────
+  let _nonTtyBusy = false;
+  const _nonTtyQueue = [];
+  const _nonTtySessionHistory = [];
+
+  async function nonTtyTelegramHandler(text) {
+    log("telegram", `[incoming] "${text.slice(0, 80)}"`);
+
+    if (_managementBusy || _analysisBusy || _nonTtyBusy) {
+      if (_nonTtyQueue.length < 5) {
+        _nonTtyQueue.push(text);
+        sendMessage(`⏳ Queued (${_nonTtyQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+      } else {
+        sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+      }
+      return;
+    }
+
+    if (text === "/help") {
+      log("telegram", "[CMD] Parsed: /help");
+      try {
+        await sendMessage(
+          "Available commands:\n" +
+          "/status — account & session info\n" +
+          "/trades — list open trades\n" +
+          "/briefing — morning briefing\n" +
+          "/close <n> — close trade #n\n" +
+          "/set <n> <note> — add trade instruction\n" +
+          "Any other text — chat with the agent"
+        );
+        log("telegram", "[CMD] Reply sent: /help");
+      } catch (e) { log("telegram", `[CMD] Reply failed: /help — ${e.message}`); }
+      return;
+    }
+
+    if (text === "/status") {
+      log("telegram", "[CMD] Parsed: /status");
+      try {
+        const openTrades = getTrackedTrades(true);
+        const today = getTodayStats();
+        const cooldown = checkCooldown(config.cooldown);
+        const hourUtc = new Date().getUTCHours();
+        const windows = config.session.allowedWindows ?? [];
+        const activeSessions = windows.filter((w) => hourUtc >= w.start && hourUtc < w.end).map((w) => w.name);
+        const paperBalance = config.paper.initialBalance + (today?.pnlUsd ?? 0);
+        const balSrc = config.paper.balanceSource === "real_exchange" ? "REAL_EXCHANGE" : "MANUAL_PAPER";
+        const lines = [
+          `Mode: ${config.paper.enabled ? "PAPER" : "LIVE"} | Exchange: ${config.instrument.exchange}`,
+          config.paper.enabled
+            ? (balSrc === "REAL_EXCHANGE" ? `Balance: fetched from exchange` : `Balance: $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`)
+            : null,
+          `Session: ${activeSessions.length ? activeSessions.join(", ") : "Outside window"} (UTC ${hourUtc}:00)`,
+          `Trades: ${openTrades.length}/${config.risk.maxOpenTrades} open`,
+          cooldown.blocked ? `Cooldown: ${cooldown.reason}` : null,
+          today ? `Today P&L: $${(today.pnlUsd ?? 0).toFixed(2)} | ${today.wins ?? 0}W / ${today.losses ?? 0}L` : null,
+        ].filter(Boolean).join("\n");
+        await sendMessage(lines);
+        log("telegram", "[CMD] Reply sent: /status");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /status — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    if (text === "/briefing") {
+      log("telegram", "[CMD] Parsed: /briefing");
+      try {
+        const briefing = await generateBriefing();
+        await sendHTML(briefing);
+        log("telegram", "[CMD] Reply sent: /briefing");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /briefing — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    if (text === "/trades" || text === "/positions") {
+      log("telegram", `[CMD] Parsed: ${text.split(" ")[0]}`);
+      try {
+        const trades = getTrackedTrades(true);
+        if (trades.length === 0) { await sendMessage("No open trades."); return; }
+        const lines = trades.map((t, i) => {
+          const pnl = t.lastPnlPct != null ? `PnL: ${t.lastPnlPct >= 0 ? "+" : ""}${t.lastPnlPct.toFixed(2)}%` : "PnL: ?";
+          const age = t.openedAt ? `${Math.floor((Date.now() - new Date(t.openedAt).getTime()) / 60_000)}m` : "?";
+          const trail = t.trailingActive ? " [trailing]" : "";
+          return `${i + 1}. ${t.symbol} ${t.direction.toUpperCase()} @ ${t.entryPrice} | Qty: ${t.quantity} | ${pnl}${trail} | ${age}`;
+        });
+        await sendMessage(`📊 Open Trades (${trades.length}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to add instruction`);
+        log("telegram", "[CMD] Reply sent: /trades");
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /trades — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    const closeMatch = text.match(/^\/close\s+(\d+)$/i);
+    if (closeMatch) {
+      log("telegram", `[CMD] Parsed: /close ${closeMatch[1]}`);
+      try {
+        const idx = parseInt(closeMatch[1]) - 1;
+        const trades = getTrackedTrades(true);
+        if (idx < 0 || idx >= trades.length) { await sendMessage("Invalid number. Use /trades first."); return; }
+        const trade = trades[idx];
+        await sendMessage(`Closing ${trade.symbol} ${trade.direction.toUpperCase()} (${trade.tradeId})…`);
+        const { content } = await agentLoop(
+          `Close trade ID ${trade.tradeId} (${trade.symbol} ${trade.direction} @ ${trade.entryPrice}). Call get_market_data to get the current price, then call close_trade with the correct trade_id and the current market price as exit_price. Report the result.`,
+          config.llm.maxSteps, [], "MANAGER", config.llm.managementModel
+        );
+        await sendMessage(stripThink(content));
+        log("telegram", `[CMD] Reply sent: /close ${closeMatch[1]}`);
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /close — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    const setMatch = text.match(/^\/set\s+(\d+)\s+(.+)$/i);
+    if (setMatch) {
+      log("telegram", `[CMD] Parsed: /set ${setMatch[1]}`);
+      try {
+        const idx = parseInt(setMatch[1]) - 1;
+        const note = setMatch[2].trim();
+        const trades = getTrackedTrades(true);
+        if (idx < 0 || idx >= trades.length) { await sendMessage("Invalid number. Use /trades first."); return; }
+        const trade = trades[idx];
+        const ok = setTradeInstruction(trade.tradeId, note);
+        if (ok) {
+          await sendMessage(`✅ Instruction set for ${trade.symbol} (${trade.tradeId}):\n"${note}"`);
+          log("telegram", `[CMD] Reply sent: /set ${setMatch[1]}`);
+        } else {
+          await sendMessage(`❌ Trade not found: ${trade.tradeId}`);
+        }
+      } catch (e) {
+        log("telegram", `[CMD] Reply failed: /set — ${e.message}`);
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    _nonTtyBusy = true;
+    try {
+      log("telegram", `[CMD] Fallback to agentLoop: "${text.slice(0, 60)}"`);
+      const hasCloseIntent = /\bclose\b|\bexit\b|\bsell\b/i.test(text);
+      const hasOpenIntent = !hasCloseIntent && /\bopen\b|\bbuy\b|\blong\b|\bshort\b|\btrade\b/i.test(text);
+      const agentRole = hasCloseIntent ? "MANAGER" : hasOpenIntent ? "ANALYST" : "GENERAL";
+      const agentModel = hasCloseIntent ? config.llm.managementModel : hasOpenIntent ? config.llm.analysisModel : config.llm.generalModel;
+      const { content } = await agentLoop(text, config.llm.maxSteps, _nonTtySessionHistory, agentRole, agentModel, null, { requireTool: true });
+      _nonTtySessionHistory.push({ role: "user", content: text });
+      _nonTtySessionHistory.push({ role: "assistant", content });
+      if (_nonTtySessionHistory.length > 20) _nonTtySessionHistory.splice(0, _nonTtySessionHistory.length - 20);
+      await sendMessage(stripThink(content));
+      log("telegram", "[CMD] agentLoop reply sent");
+    } catch (e) {
+      log("telegram", `[CMD] agentLoop reply failed: ${e.message}`);
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    } finally {
+      _nonTtyBusy = false;
+      // drain queue
+      while (_nonTtyQueue.length > 0 && !_managementBusy && !_analysisBusy && !_nonTtyBusy) {
+        const queued = _nonTtyQueue.shift();
+        await nonTtyTelegramHandler(queued);
+      }
+    }
+  }
+
+  startPolling(nonTtyTelegramHandler);
 
   (async () => {
     try {
