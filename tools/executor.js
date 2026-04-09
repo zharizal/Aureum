@@ -1008,7 +1008,7 @@ function buildPaperAccountBalance() {
     quote_asset: quoteAsset,
     base_asset: baseAsset,
     balance_usd: totalQuoteBalance,
-    initial_usd: config.paper.initialBalance,
+    ...(balanceSource !== "REAL_EXCHANGE" ? { initial_usd: config.paper.initialBalance } : {}),
     pnl_today_usd: pnlToday,
     available_balance_usd: availableQuote,
     reserved_balance_usd: reservedQuote,

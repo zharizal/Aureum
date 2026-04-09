@@ -876,10 +876,17 @@ if (isMainModule && isTTY) {
         const hourUtc = new Date().getUTCHours();
         const windows = config.session.allowedWindows ?? [];
         const activeSessions = windows.filter((w) => hourUtc >= w.start && hourUtc < w.end).map((w) => w.name);
+        const balSrc2 = config.paper.balanceSource === "real_exchange" ? "REAL_EXCHANGE" : "MANUAL_PAPER";
         const paperBalance = config.paper.initialBalance + (today?.pnlUsd ?? 0);
 
         console.log();
-        if (config.paper.enabled) console.log(`Balance:  $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`);
+        if (config.paper.enabled) {
+          if (balSrc2 === "REAL_EXCHANGE") {
+            console.log(`Bal.Src:  REAL_EXCHANGE | Balance: fetched from exchange`);
+          } else {
+            console.log(`Balance:  $${paperBalance.toFixed(2)} ${config.instrument.quoteAsset} (paper)`);
+          }
+        }
         console.log(`Exchange: ${config.instrument.exchange}`);
         console.log(`Session:  ${activeSessions.length ? activeSessions.join(", ") : "Outside configured windows"} (UTC ${hourUtc}:00)`);
         console.log(`Trades:   ${openTrades.length}/${config.risk.maxOpenTrades} open`);

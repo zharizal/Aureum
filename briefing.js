@@ -59,10 +59,17 @@ function buildSessionLine() {
 }
 
 function buildRiskLine(todayStats, openTrades, perfSummary) {
-  const dailyLossLimitUsd = config.paper.initialBalance * (config.risk.maxDailyLossPct / 100);
-  const drawdownLimitUsd = config.paper.initialBalance * (config.risk.maxDrawdownPct / 100);
   const todayPnl = todayStats?.pnlUsd ?? 0;
   const allTimePnl = perfSummary?.total_pnl_usd ?? 0;
+
+  // When balance source is real exchange, skip percentage-based limits derived from paper initialBalance
+  if (config.paper.balanceSource === "real_exchange") {
+    const todayRiskStatus = todayPnl < 0 ? `daily PnL: $${todayPnl.toFixed(2)}` : "within daily risk";
+    return `${openTrades.length}/${config.risk.maxOpenTrades} open trades | ${todayRiskStatus} | all-time PnL: $${allTimePnl.toFixed(2)}`;
+  }
+
+  const dailyLossLimitUsd = config.paper.initialBalance * (config.risk.maxDailyLossPct / 100);
+  const drawdownLimitUsd = config.paper.initialBalance * (config.risk.maxDrawdownPct / 100);
   const todayRiskStatus = todayPnl <= -dailyLossLimitUsd
     ? "daily loss limit breached"
     : todayPnl < 0

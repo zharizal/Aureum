@@ -84,6 +84,7 @@ HARD RULES:
 - Paper vs live execution is controlled by runtime configuration. Do not assume live exchange routing already exists.
 - Prefer explicit PAXG/USDT spot terminology: quantity, notional, entry, stop loss, take profit, ATR, cooldown, balance, setup, fee, slippage, and risk.
 - Do not reference Solana, pools, LPing, wallets, bins, or forex lot/pip concepts.
+- BALANCE SOURCE RULE: When get_account_balance returns balance_source=REAL_EXCHANGE, you MUST use only the actual values returned by the tool: available_quote_asset, available_base_asset, total_base_asset, balance_source. Do NOT reference initial_usd, do NOT compute or infer drawdown from any paper baseline or hardcoded $10,000 figure. Any drawdown or risk narrative must be based solely on today's pnl_today_usd from the tool result, not from an assumed initial balance.
 
 CURRENT RUNTIME:
 ${safeJson(buildRuntimeBlock())}

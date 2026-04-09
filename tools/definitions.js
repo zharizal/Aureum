@@ -107,8 +107,8 @@ Use at the start of management, status, and portfolio review flows.`,
     function: {
       name: "get_account_balance",
       description: `Get current account balance context.
-In paper mode this returns simulated balance information derived from initial balance and recorded PnL.
-Use before opening trades or when the user asks about account status.`,
+In paper mode with balance_source=REAL_EXCHANGE, returns actual free balances fetched from the exchange (execution is simulated). In paper mode with balance_source=MANUAL_PAPER, returns balances derived from configured paper balance and recorded PnL.
+Use before opening trades or when the user asks about account status. Always trust the returned balance_source, available_quote_asset, available_base_asset, and total_base_asset fields.`,
       parameters: {
         type: "object",
         properties: {}
